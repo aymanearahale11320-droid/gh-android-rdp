@@ -1,1 +1,1 @@
-IP=100.109.160.14
+LOGIN_URL=https://login.tailscale.com/a/g1eef5981fca961cd
