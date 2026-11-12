@@ -1,0 +1,282 @@
+name: win-android-rdp
+
+# أفضل نسخة ممكنة على GitHub-hosted. توقّعات واقعية:
+#   - سقف 6 ساعات لكل job (لا يمكن تجاوزه)
+#   - 4 vCPU / 16 GB / 14 GB قرص (public repo) أو 2 vCPU / 8 GB (private)
+#   - بدون GPU => swiftshader (برمجي). لعبة ثقيلة = 5-15 FPS
+#   - نسخة محاكي واحدة فقط عملية
+# الحلقة الوحيدة الجدية للتشغيل المستقر 24/7: self-hosted runner أو VPS.
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_level:
+        description: "Android API level (30-34)"
+        default: "33"
+      ram_mb:
+        description: "RAM per emulator (MB)"
+        default: "2048"
+      cores:
+        description: "vCPU per emulator (1-4)"
+        default: "2"
+      gpu_mode:
+        description: "swiftshader_indirect | angle_indirect | host"
+        default: "swiftshader_indirect"
+
+concurrency:
+  group: rdp-session
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: powershell
+
+jobs:
+  rdp:
+    # windows-2025 فيه nested virtualization مفعّل فعليًا (2022 غير مضمون).
+    # لو عندك Team/Enterprise: windows-2025-8core يعطيك 8 vCPU/32GB + تسريع حقيقي.
+    runs-on: windows-2025
+    timeout-minutes: 355
+
+    env:
+      AVD_NAME: emu0
+      AVD_HOME: C:\avd
+
+    steps:
+      # ───────────── 1. RDP خفيف: بلا مؤقتات خمول، مشفّر، فايروول للتيلنت فقط ─────────────
+      - name: RDP on (no idle limits)
+        run: |
+          $ts  = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+          $ws  = "$ts\WinStations\RDP-Tcp"
+          $pol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+
+          Set-ItemProperty $ts  -Name fDenyTSConnections -Value 0 -Type DWord
+          Set-ItemProperty $ws  -Name UserAuthentication  -Value 1 -Type DWord
+          Set-ItemProperty $ws  -Name SecurityLayer       -Value 2 -Type DWord
+          Set-ItemProperty $ws  -Name MinEncryptionLevel  -Value 3 -Type DWord
+
+          New-Item $pol -Force | Out-Null
+          Set-ItemProperty $pol -Name MaxIdleTime          -Value 0 -Type DWord
+          Set-ItemProperty $pol -Name MaxDisconnectionTime -Value 0 -Type DWord
+          Set-ItemProperty $ws  -Name KeepAliveEnable      -Value 1 -Type DWord -ErrorAction SilentlyContinue
+          Set-ItemProperty $ws  -Name KeepAliveInterval    -Value 1 -Type DWord -ErrorAction SilentlyContinue
+          Set-ItemProperty $ts  -Name fSingleSessionPerUser -Value 0 -Type DWord -ErrorAction SilentlyContinue
+          Set-ItemProperty $pol -Name fDisableAudioCapture -Value 0 -Type DWord
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389 `
+            remoteip=100.64.0.0/10,fd7a:115c:a1e0::/48 profile=any | Out-Null
+
+      # ───────────── 2. المستخدم ─────────────
+      - name: Create RDP user
+        env:
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $user = 'RDP'
+          $pw = $env:RDP_PASS
+          if ([string]::IsNullOrWhiteSpace($pw)) {
+              $b = New-Object byte[] 18
+              [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+              $pw = [Convert]::ToBase64String($b) -replace '[+/=]', 'x'
+              Write-Host "::add-mask::$pw"
+          }
+          $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+          if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
+              Set-LocalUser -Name $user -Password $sec
+          } else {
+              New-LocalUser -Name $user -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          }
+          Add-LocalGroupMember Administrators       -Member $user -ErrorAction SilentlyContinue
+          Add-LocalGroupMember 'Remote Desktop Users' -Member $user -ErrorAction SilentlyContinue
+          "RDP_PASSWORD_PLAIN=$pw" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RDP_USER=$user"         | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ───────────── 3. توفير الموارد: لا سبات، لا تحديثات، لا Defender ─────────────
+      - name: Tune for performance
+        run: |
+          powercfg /h off                              # يسترجع 4-8 GB قرص (مهم جدًا مع 14 GB)
+          powercfg /setactive SCHEME_MIN               # High performance
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change standby-timeout-ac 0
+          powercfg /change disk-timeout-ac 0
+
+          $au = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+          New-Item $au -Force | Out-Null
+          Set-ItemProperty $au -Name NoAutoRebootWithLoggedOnUsers -Value 1 -Type DWord
+          Set-ItemProperty $au -Name AUOptions -Value 1 -Type DWord
+          Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+          Set-Service  wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
+
+          Set-Service WSearch -StartupType Disabled -ErrorAction SilentlyContinue
+          Stop-Service WSearch -Force -ErrorAction SilentlyContinue
+
+          Add-MpPreference -ExclusionPath 'C:\' -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+          Write-Host ("Free C: = {0} GB" -f [math]::Round((Get-PSDrive C).Free/1GB,1))
+
+      # ───────────── 4. Tailscale ─────────────
+      - name: Tailscale up
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          $msi = "$env:TEMP\ts.msi"
+          Invoke-WebRequest 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi' -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart TS_UNATTENDEDMODE=1" -Wait
+          Remove-Item $msi -Force
+
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          & $ts up --authkey=$env:TS_AUTHKEY --hostname="gh-rdp-$env:GITHUB_RUN_ID" --accept-dns=false --unattended
+          $ip = $null
+          for ($i = 0; $i -lt 12 -and -not $ip; $i++) { Start-Sleep 5; $ip = (& $ts ip -4) 2>$null }
+          if (-not $ip) { Write-Error 'no tailscale IP' }
+          "TAILSCALE_IP=$ip" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ───────────── 5. هل يوجد تسريع فعلي؟ (قبل تحميل أي شيء) ─────────────
+      - name: Probe virtualization
+        run: |
+          $sdk = $env:ANDROID_SDK_ROOT
+          if (-not $sdk) { $sdk = $env:ANDROID_HOME }
+          "ANDROID_SDK=$sdk" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          $emu = Join-Path $sdk 'emulator\emulator.exe'
+
+          $report = & $emu -accel-check 2>&1 | Out-String
+          Write-Host $report
+          $accel = ($report -notmatch 'not installed|is not|failed|0$')
+          "ACCEL_OK=$([int]$accel)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "### Acceleration probe`n```$report```" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+          if (-not $accel) {
+              # محاولة تركيب AEHD بلا reboot (WHPX يحتاج reboot فلا ينفع هنا)
+              try {
+                  $rel = Invoke-RestMethod 'https://api.github.com/repos/google/android-emulator-hypervisor-driver/releases/latest'
+                  $url = $rel.assets[0].browser_download_url
+                  $zip = "$env:TEMP\aehd.zip"
+                  Invoke-WebRequest $url -OutFile $zip -UseBasicParsing
+                  Expand-Archive $zip -DestinationPath "$env:TEMP\aehd" -Force
+                  $bat = Get-ChildItem "$env:TEMP\aehd" -Recurse -Filter silent_install.bat | Select-Object -First 1
+                  if ($bat) { & cmd /c "`"$($bat.FullName)`"" 2>&1 | Out-Host }
+                  if ((Get-Service gvm -ErrorAction SilentlyContinue).Status -eq 'Running') {
+                      "ACCEL_OK=1" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+                      Write-Host 'AEHD installed -> hardware acceleration ON'
+                  }
+              } catch { Write-Warning "AEHD: $($_.Exception.Message)" }
+          }
+
+      # ───────────── 6. إنشاء AVD في مسار مشترك بين المستخدمين ─────────────
+      # مهم: الـrunner يعمل كـrunneradmin والمحاكي سيعمل كـRDP.
+      # بدون ANDROID_AVD_HOME على مستوى Machine لن يجد المحاكي الـAVD إطلاقًا.
+      - name: Create AVD
+        run: |
+          $sdk = $env:ANDROID_SDK
+          $env:ANDROID_AVD_HOME = $env:AVD_HOME
+          New-Item -ItemType Directory -Path $env:AVD_HOME -Force | Out-Null
+          [Environment]::SetEnvironmentVariable('ANDROID_SDK_ROOT', $sdk, 'Machine')
+          [Environment]::SetEnvironmentVariable('ANDROID_HOME',     $sdk, 'Machine')
+          [Environment]::SetEnvironmentVariable('ANDROID_AVD_HOME', $env:AVD_HOME, 'Machine')
+
+          $img = "system-images;android-${{ inputs.api_level }};google_apis;x86_64"
+          $sdkm = Join-Path $sdk 'cmdline-tools\latest\bin\sdkmanager.bat'
+          $avdm = Join-Path $sdk 'cmdline-tools\latest\bin\avdmanager.bat'
+
+          'y' | & $sdkm --sdk_root=$sdk $img 2>&1 | Select-Object -Last 3
+
+          'no' | & $avdm create avd -n $env:AVD_NAME -k $img -d pixel_5 --force 2>&1 | Out-Host
+
+          # ضبط الموارد: أخف وأسرع
+          $ini = Join-Path $env:AVD_HOME "$($env:AVD_NAME).avd\config.ini"
+          $lines = Get-Content $ini | Where-Object {
+              $_ -notmatch '^(hw\.ramSize|hw\.cpu\.ncore|hw\.gpu\.|disk\.dataPartition|vm\.heapSize|hw\.keyboard|hw\.mainKeys)'
+          }
+          $lines += @(
+              "hw.ramSize=${{ inputs.ram_mb }}"
+              "vm.heapSize=256"
+              "hw.cpu.ncore=${{ inputs.cores }}"
+              "hw.gpu.enabled=yes"
+              "hw.gpu.mode=${{ inputs.gpu_mode }}"
+              "disk.dataPartition.size=4G"
+              "hw.keyboard=yes"
+              "hw.mainKeys=no"
+          )
+          $lines | Set-Content $ini -Encoding ascii
+          Write-Host "AVD ready: $ini"
+
+      # ───────────── 7. تشغيل المحاكي داخل جلسة RDP (لا في session 0) ─────────────
+      - name: Register emulator at logon
+        run: |
+          $emu = Join-Path $env:ANDROID_SDK 'emulator\emulator.exe'
+          $arg = "-avd $env:AVD_NAME -gpu ${{ inputs.gpu_mode }} -memory ${{ inputs.ram_mb }} -cores ${{ inputs.cores }} -no-boot-anim -no-audio -no-snapshot -camera-back none -camera-front none -netdelay none -netspeed full"
+
+          $action    = New-ScheduledTaskAction -Execute $emu -Argument $arg -WorkingDirectory (Split-Path $emu)
+          $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:RDP_USER
+          $principal = New-ScheduledTaskPrincipal -UserId $env:RDP_USER -LogonType Interactive -RunLevel Highest
+          $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+          Register-ScheduledTask -TaskName 'StartEmulator' -Action $action -Trigger $trigger `
+            -Principal $principal -Settings $settings -Force | Out-Null
+
+          # لو الجلسة مفتوحة الآن، شغّله فورًا
+          if ((quser 2>$null) -match 'rdp') { Start-ScheduledTask -TaskName 'StartEmulator' }
+          Write-Host 'Scheduled task ready (starts automatically when you log in over RDP).'
+
+      - name: Wait for Android boot
+        run: |
+          $adb = Join-Path $env:ANDROID_SDK 'platform-tools\adb.exe'
+          & $adb start-server 2>&1 | Out-Null
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $booted = $false
+          while ($sw.Elapsed.TotalMinutes -lt 25 -and -not $booted) {
+              $s = (& $adb shell getprop sys.boot_completed 2>$null) -join ''
+              if ($s -match '1') { $booted = $true; break }
+              Start-Sleep 10
+          }
+          $msg = if ($booted) { "Emulator booted in $([int]$sw.Elapsed.TotalSeconds)s" }
+                 else { "Emulator did NOT finish booting in 25 min (expected without hardware acceleration)" }
+          Write-Host $msg
+          "### $msg" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          & $adb devices 2>&1 | Out-Host
+
+      # ───────────── 8. ملخص الوصول ─────────────
+      - name: Summary
+        run: |
+          $md = @"
+          ### RDP
+          | | |
+          |---|---|
+          | Address | ``$env:TAILSCALE_IP:3389`` |
+          | User | ``$env:RDP_USER`` |
+          | Password | ``$env:RDP_PASSWORD_PLAIN`` |
+          | Accel | ``$env:ACCEL_OK`` (0 = software rendering) |
+
+          سجّل الدخول ثم انتظر — المحاكي يقلع تلقائيًا عند أول logon.
+          "@
+          $md | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Write-Host $md
+
+      # ───────────── 9. Watchdog: يعيد المحاكي لو مات، ويحافظ على الجلسة ─────────────
+      - name: Keep alive + revive emulator
+        run: |
+          $deadline = (Get-Date).AddMinutes(345)
+          $adb  = Join-Path $env:ANDROID_SDK 'platform-tools\adb.exe'
+          $pol  = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+
+          while ((Get-Date) -lt $deadline) {
+              try {
+                  Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -EA SilentlyContinue
+                  Set-ItemProperty $pol -Name MaxIdleTime          -Value 0 -EA SilentlyContinue
+                  Set-ItemProperty $pol -Name MaxDisconnectionTime -Value 0 -EA SilentlyContinue
+                  if ((Get-Service TermService).Status -ne 'Running') { Start-Service TermService }
+
+                  $emuAlive = (Get-Process emulator,qemu-system-x86_64 -EA SilentlyContinue).Count -gt 0
+                  $sess = (quser 2>$null) -match 'rdp'
+                  if (-not $emuAlive -and $sess) {
+                      Start-ScheduledTask -TaskName 'StartEmulator'
+                      Write-Host 'emulator was dead -> restarted'
+                  }
+                  $dev = ((& $adb devices 2>$null) -join ' ') -match 'emulator-\d+\s+device'
+                  Write-Host ("[{0}] sess={1} emu={2} adb={3}" -f (Get-Date -f 'HH:mm:ss'), $sess, $emuAlive, $dev)
+              } catch { Write-Host "watchdog: $($_.Exception.Message)" }
+              Start-Sleep -Seconds 120
+          }

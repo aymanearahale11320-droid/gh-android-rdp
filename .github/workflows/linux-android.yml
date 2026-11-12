@@ -1,0 +1,189 @@
+name: linux-android
+
+# الأخف والأسرع: Ubuntu + KVM + محاكي بلا واجهة يُعرض على جهازك عبر scrcpy.
+#   على جهازك (مرة واحدة):  adb connect <IP>:5555   ثم   scrcpy
+#   أو لو أردت سطح مكتب كامل: شغّل الـworkflow مع gui=xfce ثم اتصل بـRDP على 3389.
+
+on:
+  workflow_dispatch:
+    inputs:
+      instances:
+        description: "Number of emulator instances (1-3)"
+        default: "1"
+      api_level:
+        description: "Android API level"
+        default: "33"
+      gui:
+        description: "none (scrcpy only) | xfce (RDP desktop)"
+        default: "none"
+
+concurrency:
+  group: android-session
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    env:
+      AVD: emu0
+
+    steps:
+      # ───────── 1. KVM: هذا هو الفرق كله ─────────
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      # ───────── 2. تحرير القرص (14 GB فقط افتراضيًا) ─────────
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+                      /usr/local/lib/android/sdk/ndk "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          sudo docker image prune -af 2>/dev/null || true
+          sudo apt-get clean
+          df -h / | tail -1
+
+      - name: Install packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq socat unzip wget >/dev/null
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+      # ───────── 3. Tailscale ─────────
+      - name: Tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey=$TS_AUTHKEY --hostname="gh-android-$GITHUB_RUN_ID" \
+                            --accept-dns=false --ssh=false
+          IP=$(tailscale ip -4)
+          echo "TS_IP=$IP" >> $GITHUB_ENV
+          echo "Tailscale IP: $IP"
+
+      # ───────── 4. SDK + AVD ─────────
+      - name: Create AVDs
+        run: |
+          export SDK="$ANDROID_SDK_ROOT"
+          [ -z "$SDK" ] && SDK="$ANDROID_HOME"
+          IMG="system-images;android-${{ inputs.api_level }};google_apis;x86_64"
+
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "emulator" "platform-tools" "$IMG" \
+              | tail -3
+
+          N=${{ inputs.instances }}
+          for i in $(seq 0 $((N-1))); do
+            NAME="emu$i"
+            echo no | "$SDK/cmdline-tools/latest/bin/avdmanager" create avd -n "$NAME" -k "$IMG" -d pixel_5 --force
+            INI="$HOME/.android/avd/$NAME.avd/config.ini"
+            # تخصيص الموارد: 2 GB رام و2 أنوية لكل نسخة، وقرص 4 GB
+            sed -i -E '/^(hw\.ramSize|hw\.cpu\.ncore|vm\.heapSize|disk\.dataPartition|hw\.gpu\.)/d' "$INI"
+            cat >> "$INI" <<EOF
+          hw.ramSize=2048
+          vm.heapSize=256
+          hw.cpu.ncore=2
+          hw.gpu.enabled=yes
+          hw.gpu.mode=swiftshader_indirect
+          disk.dataPartition.size=4G
+          EOF
+          done
+          echo "AVDs ready"
+
+      # ───────── 5. تشغيل المحاكيات بلا نافذة ─────────
+      - name: Launch emulators
+        run: |
+          export SDK="$ANDROID_SDK_ROOT"; [ -z "$SDK" ] && SDK="$ANDROID_HOME"
+          N=${{ inputs.instances }}
+          for i in $(seq 0 $((N-1))); do
+            CONSOLE=$((5554 + i*2)); ADBPORT=$((5555 + i*2))
+            nohup "$SDK/emulator/emulator" -avd "emu$i" \
+              -no-window -no-audio -no-boot-anim -no-snapshot \
+              -gpu swiftshader_indirect -accel on -memory 2048 -cores 2 \
+              -port $CONSOLE -camera-back none -camera-front none \
+              > "/tmp/emu$i.log" 2>&1 &
+            echo "started emu$i console=$CONSOLE adb=$ADBPORT"
+          done
+
+      - name: Wait for boot
+        run: |
+          export SDK="$ANDROID_SDK_ROOT"; [ -z "$SDK" ] && SDK="$ANDROID_HOME"
+          "$SDK/platform-tools/adb" start-server
+          SW=$(date +%s)
+          for i in $(seq 1 90); do
+            DONE=$("$SDK/platform-tools/adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            if [ "$DONE" = "1" ]; then
+              echo "booted in $(( $(date +%s) - SW ))s"; break
+            fi
+            sleep 5
+          done
+          "$SDK/platform-tools/adb" devices -l
+
+      # ───────── 6. تمرير ADB عبر tailnet (لـscrcpy من جهازك) ─────────
+      - name: Expose adb over tailnet
+        run: |
+          N=${{ inputs.instances }}
+          for i in $(seq 0 $((N-1))); do
+            ADBPORT=$((5555 + i*2))
+            nohup socat TCP-LISTEN:$ADBPORT,fork,reuseaddr TCP:127.0.0.1:$ADBPORT \
+              > "/tmp/socat$i.log" 2>&1 &
+          done
+          ss -ltnp | grep -E ':(555[0-9])' || true
+
+      # ───────── 7. سطح مكتب اختياري (فقط لو طلبت xfce) ─────────
+      - name: Optional desktop (xrdp)
+        if: ${{ inputs.gui == 'xfce' }}
+        run: |
+          sudo apt-get install -y -qq xfce4 xfce4-terminal xrdp >/dev/null
+          sudo adduser xrdp ssl-cert
+          echo "xfce4-session" > ~/.xsession
+          sudo systemctl enable --now xrdp
+          USER_PW="${{ secrets.RDP_PASSWORD }}"
+          [ -z "$USER_PW" ] && USER_PW="Chg$(openssl rand -hex 8)"
+          echo "runner:$USER_PW" | sudo chpasswd
+          echo "RDP_GUI_PASS=$USER_PW" >> $GITHUB_ENV
+          echo "xrdp ready on 3389"
+
+      # ───────── 8. المعلومات ─────────
+      - name: Summary
+        run: |
+          N=${{ inputs.instances }}
+          {
+            echo "### Connect from your PC"
+            echo '```'
+            echo "adb connect $TS_IP:5555"
+            echo "scrcpy"
+            echo '```'
+            echo ""
+            echo "Instances: $N | ports 5555, 5557, 5559"
+            echo "Desktop (if xfce): $TS_IP:3389  user=runner  pass=${RDP_GUI_PASS:-not created}"
+            echo ""
+            echo "Session dies at the 6h GitHub limit."
+          } | tee -a $GITHUB_STEP_SUMMARY
+
+      # ───────── 9. Watchdog ─────────
+      - name: Keep alive
+        run: |
+          export SDK="$ANDROID_SDK_ROOT"; [ -z "$SDK" ] && SDK="$ANDROID_HOME"
+          END=$(( $(date +%s) + 345*60 ))
+          N=${{ inputs.instances }}
+          while [ "$(date +%s)" -lt "$END" ]; do
+            LIVE=$(pgrep -fc qemu-system-x86_64 || echo 0)
+            if [ "$LIVE" -lt "$N" ]; then
+              echo "emulator died ($LIVE/$N) -> restarting"
+              "$SDK/emulator/emulator" -avd emu0 -no-window -no-audio -no-boot-anim \
+                -no-snapshot -gpu swiftshader_indirect -accel on -memory 2048 -cores 2 \
+                >> /tmp/emu0.log 2>&1 &
+            fi
+            echo "[$(date +%H:%M:%S)] qemu=$LIVE adb=$("$SDK/platform-tools/adb" devices | grep -c emulator || true)"
+            sleep 120
+          done

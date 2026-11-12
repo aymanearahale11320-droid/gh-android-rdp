@@ -1,0 +1,266 @@
+name: Windows RDP (Tailscale) + Android emulator
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hard limit you cannot change: a GitHub-HOSTED job dies at 6h (360 min).
+# Everything below keeps the session alive until that wall, cleanly (~5h50m).
+# For a longer session you need a self-hosted runner (5 days) or a real VPS.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      emulator_instances:
+        description: "Number of emulator instances to create (0 = RDP only)"
+        required: false
+        default: "1"
+
+concurrency:
+  group: rdp-session
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: powershell
+
+jobs:
+  rdp:
+    runs-on: windows-2022
+    timeout-minutes: 355
+
+    steps:
+      # ── 1. RDP: on, encrypted, and with every idle/disconnect timeout removed ──
+      - name: Configure RDP (no idle limits, no auto-logoff)
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $ts  = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+          $ws  = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+          $pol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+
+          # --- accept incoming RDP ---
+          Set-ItemProperty $ts -Name fDenyTSConnections -Value 0 -Type DWord
+
+          # NLA + TLS. If your mstsc refuses to connect, set UserAuthentication=0
+          # and SecurityLayer=0 (old mode, works everywhere, less safe).
+          Set-ItemProperty $ws -Name UserAuthentication -Value 1 -Type DWord
+          Set-ItemProperty $ws -Name SecurityLayer      -Value 2 -Type DWord
+          Set-ItemProperty $ws -Name MinEncryptionLevel -Value 3 -Type DWord
+
+          # --- THE fix for "it disconnects after a while" ---
+          # 0 = never. Default policy kills idle and disconnected sessions.
+          New-Item $pol -Force | Out-Null
+          Set-ItemProperty $pol -Name MaxIdleTime          -Value 0 -Type DWord
+          Set-ItemProperty $pol -Name MaxDisconnectionTime -Value 0 -Type DWord
+          Set-ItemProperty $pol -Name MaxLogonTime         -Value 0 -Type DWord -ErrorAction SilentlyContinue
+          Set-ItemProperty $ws  -Name KeepAliveEnable      -Value 1 -Type DWord -ErrorAction SilentlyContinue
+          Set-ItemProperty $ws  -Name KeepAliveInterval    -Value 1 -Type DWord -ErrorAction SilentlyContinue
+
+          # allow a second connection from the same user (helps when a client hangs)
+          Set-ItemProperty $ts -Name fSingleSessionPerUser -Value 0 -Type DWord -ErrorAction SilentlyContinue
+
+          # redirect audio/clipboard/camera so you can actually use the emulator
+          Set-ItemProperty $pol -Name fDisableAudioCapture -Value 0 -Type DWord
+          Set-ItemProperty $pol -Name fDisableCam          -Value 0 -Type DWord
+          Set-ItemProperty $pol -Name fDisableClip         -Value 0 -Type DWord
+
+          # --- firewall: 3389 reachable ONLY from the tailnet ---
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389 `
+            remoteip=100.64.0.0/10,fd7a:115c:a1e0::/48 profile=any | Out-Null
+
+          # NOTE: no Restart-Service TermService here on purpose.
+          # Restarting it is what drops the listener right after setup.
+          Write-Host "RDP configured. TermService = $((Get-Service TermService).Status)"
+
+      # ── 2. User account (password comes from a secret, never from the YAML) ──
+      - name: Create RDP user
+        env:
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $user = 'RDP'
+
+          $pw = $env:RDP_PASS
+          if ([string]::IsNullOrWhiteSpace($pw)) {
+              # no secret configured -> generate one and show it in the summary
+              $bytes = New-Object byte[] 18
+              [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+              $pw = [Convert]::ToBase64String($bytes) -replace '[+/=]', 'x'
+              Write-Host "::add-mask::$pw"
+          }
+
+          $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+          if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
+              Set-LocalUser -Name $user -Password $sec
+          } else {
+              New-LocalUser -Name $user -Password $sec -AccountNeverExpires -PasswordNeverExpires -FullName 'RDP' | Out-Null
+          }
+          Add-LocalGroupMember -Group 'Administrators'       -Member $user -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $user -ErrorAction SilentlyContinue
+
+          "RDP_PASSWORD_PLAIN=$pw" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RDP_USER=$user"         | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "User '$user' ready, in Administrators + Remote Desktop Users."
+
+      # ── 3. Stop everything that silently kills a long session ──
+      - name: Kill sleep / reboots / AV overhead
+        run: |
+          # never sleep, never hibernate, never spin down the disk
+          powercfg /change standby-timeout-ac 0
+          powercfg /change hibernate-timeout-ac 0
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change disk-timeout-ac 0
+          powercfg /setactive SCHEME_MIN   # High performance
+
+          # Windows Update: no auto reboot under a logged-on user, service off
+          $au = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+          New-Item $au -Force | Out-Null
+          Set-ItemProperty $au -Name NoAutoRebootWithLoggedOnUsers -Value 1 -Type DWord
+          Set-ItemProperty $au -Name AUOptions                     -Value 1 -Type DWord
+          Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+          Set-Service  wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
+
+          # Defender: excluded (this VM is disposable and emulators are I/O heavy)
+          Add-MpPreference -ExclusionPath 'C:\' -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+
+          Write-Host "Power / update / AV tuned."
+
+      # ── 4. Tailscale ──
+      - name: Install Tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Join-Path $env:TEMP 'tailscale.msi'
+          Invoke-WebRequest 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi' -OutFile $msi
+          # TS_UNATTENDEDMODE=1 is required on Windows so the daemon keeps running
+          # while nobody is logged in (otherwise the node goes offline).
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart TS_UNATTENDEDMODE=1" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Error "msiexec failed: $($p.ExitCode)" }
+          Remove-Item $msi -Force
+
+      - name: Bring Tailscale up
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+          $host_ = "gh-rdp-$env:GITHUB_RUN_ID"
+
+          & $exe up --authkey=$env:TS_AUTHKEY --hostname=$host_ --accept-dns=false --unattended
+
+          $ip = $null
+          for ($i = 0; $i -lt 12 -and -not $ip; $i++) {
+              Start-Sleep -Seconds 5
+              $ip = (& $exe ip -4) 2>$null
+          }
+          if (-not $ip) { Write-Error 'Tailscale IP not assigned.' }
+
+          "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TS_HOSTNAME=$host_" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Tailscale IP: $ip"
+
+      - name: Verify 3389 is listening
+        run: |
+          $ok = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+          if (-not $ok.TcpTestSucceeded) { Write-Error 'Port 3389 not reachable on the tailnet IP' }
+          Write-Host 'RDP port reachable over Tailscale.'
+
+      # ── 5. Emulator (optional: set repository variables EMULATOR_URL / EMULATOR_ARGS) ──
+      #  vars.EMULATOR_URL  = direct .exe link of the emulator installer
+      #  vars.EMULATOR_ARGS = silent flags, e.g. "/S" (NSIS) or "/quiet /norestart"
+      # If the variable is empty this step is a no-op, RDP still works.
+      - name: Install emulator
+        env:
+          EMULATOR_URL: ${{ vars.EMULATOR_URL }}
+          EMULATOR_ARGS: ${{ vars.EMULATOR_ARGS }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:EMULATOR_URL)) {
+              Write-Warning 'EMULATOR_URL not set -> skipping (RDP only).'
+              exit 0
+          }
+          $exe = Join-Path $env:TEMP 'emulator-setup.exe'
+          Invoke-WebRequest $env:EMULATOR_URL -OutFile $exe -UseBasicParsing
+          $args = $env:EMULATOR_ARGS
+          if ([string]::IsNullOrWhiteSpace($args)) { $args = '/S' }
+          $p = Start-Process $exe -ArgumentList $args -Wait -PassThru
+          Write-Host "Installer exit code: $($p.ExitCode)"
+          Remove-Item $exe -Force -ErrorAction SilentlyContinue
+
+      - name: Start emulator instances
+        env:
+          COUNT: ${{ inputs.emulator_instances }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:COUNT) -or [int]$env:COUNT -le 0) { exit 0 }
+
+          # find whichever multi-instance console is installed
+          $candidates = @(
+            'C:\LDPlayer\LDPlayer9\ldconsole.exe',
+            'C:\LDPlayer\LDPlayer64\ldconsole.exe',
+            'C:\Program Files\Netease\MuMuPlayer-12.0\shell\MuMuManager.exe',
+            "$env:ProgramFiles\Netease\MuMuPlayer-12.0\shell\MuMuManager.exe"
+          )
+          $console = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $console) {
+              Write-Warning 'No emulator console found -> skipping instance launch.'
+              exit 0
+          }
+          Write-Host "Using console: $console"
+
+          for ($i = 0; $i -lt [int]$env:COUNT; $i++) {
+              $name = "emu$i"
+              if ($console -like '*ldconsole.exe') {
+                  & $console add    --name $name 2>&1 | Out-Host
+                  & $console launch --name $name 2>&1 | Out-Host
+              } else {
+                  & $console create  -n $name 2>&1 | Out-Host
+                  & $console control -n $name launch 2>&1 | Out-Host
+              }
+              Start-Sleep -Seconds 20
+          }
+          Write-Host "Requested $env:COUNT instance(s)."
+
+      # ── 6. Summary + keep-alive until just before the 6h wall ──
+      - name: Publish access info
+        run: |
+          $md = @"
+          ### RDP access
+          | | |
+          |---|---|
+          | Address | ``$env:TAILSCALE_IP:3389`` |
+          | Hostname (MagicDNS) | ``$env:TS_HOSTNAME`` |
+          | Username | ``$env:RDP_USER`` |
+          | Password | ``$env:RDP_PASSWORD_PLAIN`` |
+
+          Session is killed automatically by GitHub at the 6-hour job limit.
+          "@
+          $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Write-Host $md
+
+      - name: Keep session alive
+        run: |
+          # 340 min of sleep, leaving ~15 min of margin before GitHub's hard 360
+          $deadline = (Get-Date).AddMinutes(340)
+          $pol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+
+          while ((Get-Date) -lt $deadline) {
+              try {
+                  if ((Get-Service TermService).Status -ne 'Running') {
+                      Start-Service TermService
+                      Write-Host 'TermService was down -> restarted.'
+                  }
+                  Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction SilentlyContinue
+                  Set-ItemProperty $pol -Name MaxIdleTime          -Value 0 -ErrorAction SilentlyContinue
+                  Set-ItemProperty $pol -Name MaxDisconnectionTime -Value 0 -ErrorAction SilentlyContinue
+
+                  $sessions = (qwinsta 2>&1 | Select-String 'rdp-tcp#').Count
+                  $listener = (Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue).Count
+                  Write-Host ("[{0}] alive | rdp sessions={1} listeners={2}" -f (Get-Date -Format 'HH:mm:ss'), $sessions, $listener)
+              } catch {
+                  Write-Host "watchdog: $($_.Exception.Message)"
+              }
+              Start-Sleep -Seconds 300
+          }
+          Write-Host 'Time budget reached, closing job.'
