@@ -77,17 +77,37 @@ jobs:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey="$TS_AUTHKEY" \
-                            --hostname="gh-android-$GITHUB_RUN_ID" \
-                            --accept-dns=false --ssh=false
-          IP=$(tailscale ip -4)
+          HOST="gh-android-$GITHUB_RUN_ID"
+
+          if [ -n "$TS_AUTHKEY" ]; then
+            sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOST" --accept-dns=false
+          else
+            # لا يوجد مفتاح: نطبع رابط التفعيل مرة واحدة ويكفي ضغطة واحدة عليه
+            sudo bash -c "nohup tailscale up --hostname=$HOST --accept-dns=false >/tmp/ts.log 2>&1 &"
+            for i in $(seq 1 40); do
+              grep -q 'login.tailscale.com' /tmp/ts.log 2>/dev/null && break
+              sleep 3
+            done
+            URL=$(grep -oE 'https://login\.tailscale\.com/[A-Za-z0-9]+' /tmp/ts.log | head -1)
+            if [ -z "$URL" ]; then echo "no login url"; cat /tmp/ts.log; exit 1; fi
+            echo "::notice title=Tailscale login::افتح الرابط لتفعيل السيرفر: $URL"
+            { echo "## اضغط لتفعيل السيرفر في Tailscale"; echo; echo "$URL"; } >> $GITHUB_STEP_SUMMARY
+            echo "LOGIN_URL=$URL" >> $GITHUB_ENV
+          fi
+
+          IP=""
+          for i in $(seq 1 120); do
+            IP=$(tailscale ip -4 2>/dev/null); [ -n "$IP" ] && break
+            sleep 5
+          done
+          [ -z "$IP" ] && { echo "no tailscale ip yet"; exit 1; }
           echo "TS_IP=$IP" >> $GITHUB_ENV
           echo "Tailscale IP: $IP"
 
       # ── 5. الفتح للـtailnet فقط، وإغلاق كل شيء آخر ───────────────────────
       - name: Firewall (tailnet only)
         run: |
-          for p in 3389 5554 5555 5556 5557 5558 5559; do
+          for p in 3389 15555 15557 15559; do
             sudo iptables -A INPUT -i tailscale0 -p tcp --dport $p -j ACCEPT
           done
           sudo iptables -A INPUT -p tcp --dport 3389 -j DROP
@@ -151,10 +171,10 @@ jobs:
         run: |
           N=${{ inputs.instances }}
           for i in $(seq 0 $((N-1))); do
-            P=$((5555 + i*2))
-            nohup socat TCP-LISTEN:$P,fork,reuseaddr TCP:127.0.0.1:$P > "/tmp/socat$i.log" 2>&1 &
+            EXT=$((15555 + i*2)); INT=$((5555 + i*2))
+            nohup socat TCP-LISTEN:$EXT,fork,reuseaddr TCP:127.0.0.1:$INT > "/tmp/socat$i.log" 2>&1 &
           done
-          sleep 2; ss -ltn | grep -E ':(555[0-9])' || true
+          sleep 2; ss -ltn | grep -E ':(1555[0-9])' || true
 
       # ── 9. RDP: مستخدم + جلسة xfce بلا قفل شاشة ─────────────────────────
       - name: Configure RDP session
@@ -205,8 +225,9 @@ jobs:
             echo "| RDP | \`$TS_IP:3389\` |"
             echo "| User | \`runner\` |"
             echo "| Password | \`$RDP_PASS_PLAIN\` |"
-            echo "| ADB (من جهازك) | \`adb connect $TS_IP:5555\` ثم \`scrcpy\` |"
-            echo "| Instances | $N (منافذ 5555 / 5557 / 5559) |"
+            echo "| ADB (من جهازك) | \`adb connect $TS_IP:15555\` ثم \`scrcpy\` |"
+            echo "| Instances | $N (منافذ 15555 / 15557 / 15559) |"
+            if [ -n "$LOGIN_URL" ]; then echo "| Tailscale | [$LOGIN_URL]($LOGIN_URL) |"; fi
             echo ""
             echo "داخل السطح المكتب: Chrome + نافذة Android (scrcpy) تلقائيًا."
             echo ""
