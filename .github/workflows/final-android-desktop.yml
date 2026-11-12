@@ -37,6 +37,8 @@ jobs:
     timeout-minutes: 350
 
     steps:
+      - uses: actions/checkout@v4
+
       # ── 1. KVM: التسريع الحقيقي ──────────────────────────────────────────
       - name: Enable KVM
         run: |
