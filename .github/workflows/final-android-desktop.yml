@@ -88,7 +88,7 @@ jobs:
               grep -q 'login.tailscale.com' /tmp/ts.log 2>/dev/null && break
               sleep 3
             done
-            URL=$(grep -oE 'https://login\.tailscale\.com/[A-Za-z0-9]+' /tmp/ts.log | head -1)
+            URL=$(grep -oE 'https://login\.tailscale\.com/[^[:space:]]+' /tmp/ts.log | head -1)
             if [ -z "$URL" ]; then echo "no login url"; cat /tmp/ts.log; exit 1; fi
             echo "::notice title=Tailscale login::افتح الرابط لتفعيل السيرفر: $URL"
             { echo "## اضغط لتفعيل السيرفر في Tailscale"; echo; echo "$URL"; } >> $GITHUB_STEP_SUMMARY
@@ -96,11 +96,11 @@ jobs:
           fi
 
           IP=""
-          for i in $(seq 1 120); do
-            IP=$(tailscale ip -4 2>/dev/null); [ -n "$IP" ] && break
+          for i in $(seq 1 240); do
+            IP=$(tailscale ip -4 2>/dev/null || true); [ -n "$IP" ] && break
             sleep 5
           done
-          [ -z "$IP" ] && { echo "no tailscale ip yet"; exit 1; }
+          if [ -z "$IP" ]; then echo "no tailscale ip yet"; cat /tmp/ts.log; exit 1; fi
           echo "TS_IP=$IP" >> $GITHUB_ENV
           echo "Tailscale IP: $IP"
 
