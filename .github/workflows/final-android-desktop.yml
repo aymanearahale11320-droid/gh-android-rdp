@@ -29,7 +29,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   android:
@@ -75,34 +75,41 @@ jobs:
       - name: Tailscale
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          source .github/scripts/publish.sh
           curl -fsSL https://tailscale.com/install.sh | sh
           HOST="gh-android-$GITHUB_RUN_ID"
+          URL=""
 
           if [ -n "$TS_AUTHKEY" ]; then
-            sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOST" --accept-dns=false
+            sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOST" --accept-dns=false || true
           else
-            # لا يوجد مفتاح: نطبع رابط التفعيل مرة واحدة ويكفي ضغطة واحدة عليه
             sudo bash -c "nohup tailscale up --hostname=$HOST --accept-dns=false >/tmp/ts.log 2>&1 &"
             for i in $(seq 1 40); do
               grep -q 'login.tailscale.com' /tmp/ts.log 2>/dev/null && break
               sleep 3
             done
-            URL=$(grep -oE 'https://login\.tailscale\.com/[^[:space:]]+' /tmp/ts.log | head -1)
-            if [ -z "$URL" ]; then echo "no login url"; cat /tmp/ts.log; exit 1; fi
-            echo "::notice title=Tailscale login::افتح الرابط لتفعيل السيرفر: $URL"
-            { echo "## اضغط لتفعيل السيرفر في Tailscale"; echo; echo "$URL"; } >> $GITHUB_STEP_SUMMARY
+            URL=$(grep -oE 'https://login\.tailscale\.com/[^[:space:]]+' /tmp/ts.log | head -1 || true)
             echo "LOGIN_URL=$URL" >> $GITHUB_ENV
+            echo "::notice title=Tailscale login::افتح الرابط: $URL"
+            { echo "## تفعيل السيرفر"; echo; echo "$URL"; } >> $GITHUB_STEP_SUMMARY
+            publish "LOGIN_URL=$URL"
           fi
 
           IP=""
-          for i in $(seq 1 240); do
+          for i in $(seq 1 360); do
             IP=$(tailscale ip -4 2>/dev/null || true); [ -n "$IP" ] && break
             sleep 5
           done
-          if [ -z "$IP" ]; then echo "no tailscale ip yet"; cat /tmp/ts.log; exit 1; fi
-          echo "TS_IP=$IP" >> $GITHUB_ENV
-          echo "Tailscale IP: $IP"
+          if [ -n "$IP" ]; then
+            echo "TS_IP=$IP" >> $GITHUB_ENV
+            publish "IP=$IP"
+            echo "Tailscale IP: $IP"
+          else
+            echo "::warning::not authorized yet - continuing, the watchdog keeps polling"
+            publish "LOGIN_URL=$URL"
+          fi
 
       # ── 5. الفتح للـtailnet فقط، وإغلاق كل شيء آخر ───────────────────────
       - name: Firewall (tailnet only)
@@ -236,9 +243,26 @@ jobs:
 
       # ── 11. Watchdog: يحيي المحاكي و xrdp إن سقطا ────────────────────────
       - name: Keep alive
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          source .github/scripts/publish.sh
           export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           N=${{ inputs.instances }}
+
+          # لو لم يُفعَّل Tailscale بعد: ننتظر الضغطة وننشر الـIP فور توفره
+          if [ -z "$TS_IP" ]; then
+            for i in $(seq 1 720); do
+              IP=$(tailscale ip -4 2>/dev/null || true)
+              if [ -n "$IP" ]; then
+                echo "TS_IP=$IP" >> $GITHUB_ENV
+                publish "IP=$IP"
+                echo "tailscale authorised: $IP"
+                break
+              fi
+              sleep 5
+            done
+          fi
           END=$(( $(date +%s) + 345*60 ))
           while [ "$(date +%s)" -lt "$END" ]; do
             for i in $(seq 0 $((N-1))); do
