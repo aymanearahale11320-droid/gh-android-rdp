@@ -127,6 +127,9 @@ jobs:
       - name: Create AVDs
         run: |
           export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> $GITHUB_ENV
           IMG="system-images;android-${{ inputs.api_level }};${{ inputs.image_type }};x86_64"
 
           yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
@@ -136,8 +139,10 @@ jobs:
           for i in $(seq 0 $((N-1))); do
             NAME="emu$i"
             echo no | "$SDK/cmdline-tools/latest/bin/avdmanager" create avd \
-                       -n "$NAME" -k "$IMG" -d pixel_5 --force >/dev/null
-            INI="$HOME/.android/avd/$NAME.avd/config.ini"
+                       -n "$NAME" -k "$IMG" -d pixel_5 --force \
+                       -p "$ANDROID_AVD_HOME/$NAME.avd" >/dev/null
+            INI="$ANDROID_AVD_HOME/$NAME.avd/config.ini"
+            [ -f "$INI" ] || { echo "AVD creation failed for $NAME"; exit 1; }
             sed -i -E '/^(hw\.ramSize|hw\.cpu\.ncore|vm\.heapSize|disk\.dataPartition|hw\.gpu\.)/d' "$INI"
             printf '%s\n' \
               'hw.ramSize=2048' 'vm.heapSize=256' 'hw.cpu.ncore=2' \
