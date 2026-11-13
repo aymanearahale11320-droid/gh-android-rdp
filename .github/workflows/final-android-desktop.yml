@@ -115,6 +115,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           STATUS_FILE: status-${{ inputs.slot }}.txt
         run: |
+          sed -i '1s/^\xEF\xBB\xBF//' .github/scripts/publish.sh 2>/dev/null || true
           source .github/scripts/publish.sh
           curl -fsSL https://tailscale.com/install.sh | sh
           HOST="gh-android-$GITHUB_RUN_ID"
@@ -450,6 +451,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           STATUS_FILE: status-${{ inputs.slot }}.txt
         run: |
+          sed -i '1s/^\xEF\xBB\xBF//' .github/scripts/publish.sh 2>/dev/null || true
           source .github/scripts/publish.sh
           N=${{ inputs.instances }}
           {
@@ -480,6 +482,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           STATUS_FILE: status-${{ inputs.slot }}.txt
         run: |
+          sed -i '1s/^\xEF\xBB\xBF//' .github/scripts/publish.sh 2>/dev/null || true
           source .github/scripts/publish.sh
           export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           N=${{ inputs.instances }}
