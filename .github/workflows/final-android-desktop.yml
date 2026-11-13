@@ -23,9 +23,12 @@ on:
       image_type:
         description: "google_apis (root) | google_apis_playstore (Play Store)"
         default: "google_apis"
+      slot:
+        description: "Slot number (1-10) — كل slot = سيرفر مستقل يعمل بالتوازي"
+        default: "1"
 
 concurrency:
-  group: android-session
+  group: android-session-${{ inputs.slot }}
   cancel-in-progress: true
 
 permissions:
@@ -110,6 +113,7 @@ jobs:
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
           GH_TOKEN: ${{ github.token }}
+          STATUS_FILE: status-${{ inputs.slot }}.txt
         run: |
           source .github/scripts/publish.sh
           curl -fsSL https://tailscale.com/install.sh | sh
@@ -468,6 +472,7 @@ jobs:
       - name: Keep alive
         env:
           GH_TOKEN: ${{ github.token }}
+          STATUS_FILE: status-${{ inputs.slot }}.txt
         run: |
           source .github/scripts/publish.sh
           export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
