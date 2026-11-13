@@ -146,7 +146,9 @@ jobs:
           SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
           SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
           AM="$SDK/cmdline-tools/latest/bin/avdmanager"
-          AVD_HOME="$HOME/.android/avd"
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          export ANDROID_SDK_ROOT="$SDK"
+          AVD_HOME="$ANDROID_AVD_HOME"
           mkdir -p "$AVD_HOME"
 
           T0=$(date +%s)
@@ -157,10 +159,12 @@ jobs:
 
           for i in $(seq 0 $((N-1))); do
             NAME="emu$i"
-            echo no | "$AM" create avd -n "$NAME" -k "$IMG" -d pixel_5 --force \
-              -p "$AVD_HOME/$NAME.avd" >/dev/null 2>&1 || true
+            rm -rf "$AVD_HOME/$NAME.avd" "$AVD_HOME/$NAME.ini"
+            echo no | "$AM" create avd -n "$NAME" -k "$IMG" -d pixel_5 --force > /tmp/avd-$i.log 2>&1
             INI="$AVD_HOME/$NAME.avd/config.ini"
-            [ -f "$INI" ] || { echo "AVD $NAME creation failed"; exit 1; }
+            if [ ! -f "$INI" ]; then
+              echo "AVD $NAME creation failed:"; tail -10 /tmp/avd-$i.log; exit 1
+            fi
             sed -i -E '/^(hw\.ramSize|hw\.cpu\.ncore|vm\.heapSize|disk\.dataPartition|hw\.gpu\.|hw\.lcd\.|hw\.keyboard|hw\.mainKeys|hw\.audio|hw\.sdCard|PlayStore|tag\.)/d' "$INI"
             printf '%s\n' \
               "hw.ramSize=$MEM" 'vm.heapSize=512' "hw.cpu.ncore=$CORES" \
