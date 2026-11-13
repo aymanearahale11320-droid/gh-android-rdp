@@ -1,0 +1,47 @@
+name: _probe
+on: workflow_dispatch
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SDK inventory
+        run: |
+          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "SDK=$SDK"
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --list_installed 2>/dev/null | head -40 || true
+          echo "--- system-images dir ---"
+          ls "$SDK/system-images" 2>/dev/null || echo none
+          echo "--- tools ---"
+          for t in jq socat curl base64 xfce4-session xrdp scrcpy adb openssl; do printf "%s: " "$t"; command -v $t || echo MISSING; done
+          echo "--- sudo ---"; sudo -n true && echo "passwordless sudo OK" || echo "sudo needs password"
+          echo "--- resources ---"; nproc; free -m | head -2; df -h / | tail -1
+
+      - name: Install emulator
+        run: |
+          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          start=$(date +%s)
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "emulator" "platform-tools" >/tmp/sdk.log 2>&1 || tail -5 /tmp/sdk.log
+          echo "installed in $(( $(date +%s) - start ))s"
+
+      - name: Probe IMEI knobs
+        run: |
+          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "===== emulator help (imei/radio/prop) ====="
+          "$SDK/emulator/emulator" -help-all 2>&1 | grep -iE "imei|radio|-prop |gsm" | head -40 || true
+          echo "===== exact IMEI string in binaries ====="
+          for f in "$SDK/emulator/emulator" "$SDK/emulator/qemu/linux-x86_64/qemu-system-x86_64"; do
+            if [ -f "$f" ]; then printf "%s -> " "$f"; grep -a -c "358240051111110" "$f" || true; fi
+          done
+          echo "===== IMEI string in libs ====="
+          grep -a -l "358240051111110" "$SDK"/emulator/lib64/*.so "$SDK"/emulator/qemu/linux-x86_64/lib64/*.so 2>/dev/null || echo "not found in any lib"
+          echo "===== imei symbols ====="
+          strings -a "$SDK/emulator/qemu/linux-x86_64/qemu-system-x86_64" 2>/dev/null | grep -iE "^imei|imei$|IMEI" | head -20 || true
+          echo "===== android-30 images available ====="
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --list 2>/dev/null | grep -E "system-images;android-30;.*x86_64" | head -10 || true
+          echo "===== play image tag ====="
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --list 2>/dev/null | grep -E "google_apis_playstore;x86_64" | head -6 || true
