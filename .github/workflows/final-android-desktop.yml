@@ -446,7 +446,11 @@ jobs:
 
       # ── 10. الملخص ───────────────────────────────────────────────────────
       - name: Summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_FILE: status-${{ inputs.slot }}.txt
         run: |
+          source .github/scripts/publish.sh
           N=${{ inputs.instances }}
           {
             echo "## الوصول"
@@ -468,6 +472,7 @@ jobs:
             echo "> إعدادات الأداء: AVD 720×1280 · سطح مكتب 1280×720 · xrdp 16-bit · compositing معطّل."
             echo "> تُحذف الآلة عند سقف 6 ساعات."
           } | tee -a $GITHUB_STEP_SUMMARY
+          publish "IP=$TS_IP|SLOT=${{ inputs.slot }}|RUN=$GITHUB_RUN_ID|INSTANCES=$N|START=$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAC=52:54:00:12:34:56|PORTS=15555,15557,15559"
 
       # ── 11. Watchdog: يحيي المحاكي و xrdp إن سقطا ────────────────────────
       - name: Keep alive
