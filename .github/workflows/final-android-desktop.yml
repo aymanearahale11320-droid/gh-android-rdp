@@ -143,11 +143,12 @@ jobs:
                        -p "$ANDROID_AVD_HOME/$NAME.avd" >/dev/null
             INI="$ANDROID_AVD_HOME/$NAME.avd/config.ini"
             [ -f "$INI" ] || { echo "AVD creation failed for $NAME"; exit 1; }
-            sed -i -E '/^(hw\.ramSize|hw\.cpu\.ncore|vm\.heapSize|disk\.dataPartition|hw\.gpu\.)/d' "$INI"
+            sed -i -E '/^(hw\.ramSize|hw\.cpu\.ncore|vm\.heapSize|disk\.dataPartition|hw\.gpu\.|hw\.lcd\.)/d' "$INI"
             printf '%s\n' \
               'hw.ramSize=2048' 'vm.heapSize=256' 'hw.cpu.ncore=2' \
               'hw.gpu.enabled=yes' 'hw.gpu.mode=swiftshader_indirect' \
-              'disk.dataPartition.size=3G' >> "$INI"
+              'disk.dataPartition.size=3G' \
+              'hw.lcd.width=720' 'hw.lcd.height=1280' 'hw.lcd.density=320' >> "$INI"
           done
           echo "AVDs created: $N"
 
@@ -159,7 +160,7 @@ jobs:
           for i in $(seq 0 $((N-1))); do
             CONSOLE=$((5554 + i*2))
             nohup "$SDK/emulator/emulator" -avd "emu$i" \
-              -no-window -no-audio -no-boot-anim -no-snapshot \
+              -no-window -no-audio -no-boot-anim -no-snapshot -no-metrics \
               -gpu swiftshader_indirect -accel on -memory 2048 -cores 2 \
               -port $CONSOLE -camera-back none -camera-front none \
               > "/tmp/emu$i.log" 2>&1 &
@@ -205,8 +206,19 @@ jobs:
             'export XDG_SESSION_TYPE=x11' \
             'export XDG_CURRENT_DESKTOP=XFCE' \
             'xset s off; xset -dpms; xset s noblank' \
+            '( sleep 4; xrandr -s 1280x720 2>/dev/null || xrandr --fb 1280x720 2>/dev/null || true ) &' \
             'exec dbus-launch --sh-syntax --exit-with-session startxfce4' > ~/.xsession
           chmod +x ~/.xsession
+
+          # إيقاف compositing (يوفّر CPU كبير في xfwm4 على السيرفر)
+          mkdir -p ~/.config/xfce4/xfconf/xfce-perchannel-xml
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<channel name="xfwm4" version="1.0">' \
+            '  <property name="general" type="empty">' \
+            '    <property name="use_compositing" type="bool" value="false"/>' \
+            '  </property>' \
+            '</channel>' > ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
 
           # adb + scrcpy في PATH لكل الجلسات
           export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
@@ -216,13 +228,25 @@ jobs:
           mkdir -p ~/.config/autostart
           printf '%s\n' \
             '[Desktop Entry]' 'Type=Application' 'Name=Android' \
-            'Exec=bash -lc "sleep 8; scrcpy --max-size 1280 --max-fps 30 --window-title Android"' \
+            'Exec=bash -lc "sleep 8; scrcpy --max-size 720 --max-fps 30 --video-bit-rate 2M --no-audio --window-title Android"' \
             'Terminal=false' 'X-GNOME-Autostart-enabled=true' > ~/.config/autostart/android.desktop
 
           # لا سبات ولا قفل شاشة
           xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-enabled -n -t bool -s false 2>/dev/null || true
 
-          sudo sed -i -E 's/^#?port=3389/port=3389/' /etc/xrdp/xrdp.ini
+          # xrdp: 16-bit + ضغط + بلا تأخير (يخفّض الحمل على CPU والشبكة)
+          INI=/etc/xrdp/xrdp.ini
+          sudo sed -i -E 's/^#?port=3389/port=3389/' $INI
+          for kv in max_bpp=16 crypt_level=low use_compression=yes tcp_nodelay=yes bitmap_cache=yes; do
+            k=${kv%%=*}; v=${kv#*=}
+            if grep -qE "^#?${k}=" $INI; then
+              sudo sed -i -E "s|^#?${k}=.*|${k}=${v}|" $INI
+            else
+              sudo sed -i "/^\[Globals\]/a ${k}=${v}" $INI
+            fi
+          done
+          grep -E '^(max_bpp|crypt_level|use_compression|tcp_nodelay|bitmap_cache)=' $INI || true
+
           sudo systemctl enable xrdp >/dev/null 2>&1
           sudo systemctl restart xrdp
           sudo systemctl is-active xrdp
@@ -245,6 +269,7 @@ jobs:
             echo ""
             echo "داخل السطح المكتب: Chrome + نافذة Android (scrcpy) تلقائيًا."
             echo ""
+            echo "> إعدادات الأداء: AVD 720×1280 · سطح مكتب 1280×720 · xrdp 16-bit · compositing معطّل."
             echo "> تُحذف الآلة عند سقف 6 ساعات."
           } | tee -a $GITHUB_STEP_SUMMARY
 
@@ -276,7 +301,7 @@ jobs:
               if ! pgrep -f "\-avd emu$i" >/dev/null; then
                 echo "[$(date +%H:%M:%S)] emu$i dead -> restart"
                 nohup "$SDK/emulator/emulator" -avd "emu$i" -no-window -no-audio \
-                  -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on \
+                  -no-boot-anim -no-snapshot -no-metrics -gpu swiftshader_indirect -accel on \
                   -memory 2048 -cores 2 -port $((5554 + i*2)) >> "/tmp/emu$i.log" 2>&1 &
                 sleep 20
               fi
