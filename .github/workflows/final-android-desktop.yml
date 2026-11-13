@@ -450,7 +450,7 @@ jobs:
             echo "|---|---|"
             echo "| RDP | \`$TS_IP:3389\` |"
             echo "| User | \`runner\` |"
-            echo "| Password | \`$RDP_PASS_PLAIN\` |"
+            echo "| Password | من الـSecret \`RDP_PASSWORD\` |"
             echo "| ADB (من جهازك) | \`adb connect $TS_IP:15555\` ثم \`scrcpy\` |"
             echo "| SSH | \`ssh runner@$TS_IP\` (نفس كلمة السر) |"
             echo "| أزرار التحكم | رجوع · رئيسية · التطبيقات الأخيرة (مفعّلة) |"
