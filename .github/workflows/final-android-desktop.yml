@@ -18,8 +18,8 @@ on:
         description: "Emulator instances (1-3)"
         default: "1"
       api_level:
-        description: "Android API level"
-        default: "33"
+        description: "Android API level (30 = Android 11)"
+        default: "30"
       image_type:
         description: "google_apis (root) | google_apis_playstore (Play Store)"
         default: "google_apis"
@@ -41,6 +41,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # ── 0. إعلان البدء فورًا (لتظهر النسخة في التطبيق أثناء التجهيز) ──────
+      - name: Announce start
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_FILE: status-${{ inputs.slot }}.txt
+        run: |
+          sed -i '1s/^\xEF\xBB\xBF//' .github/scripts/publish.sh 2>/dev/null || true
+          source .github/scripts/publish.sh
+          echo "RUN_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+          publish "STATE=starting|SLOT=${{ inputs.slot }}|RUN=$GITHUB_RUN_ID|INSTANCES=${{ inputs.instances }}|START=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
       # ── 1. KVM: التسريع الحقيقي ──────────────────────────────────────────
       - name: Enable KVM
@@ -143,7 +154,7 @@ jobs:
           done
           if [ -n "$IP" ]; then
             echo "TS_IP=$IP" >> $GITHUB_ENV
-            publish "IP=$IP"
+            publish "STATE=booting|IP=$IP|SLOT=${{ inputs.slot }}|RUN=$GITHUB_RUN_ID|INSTANCES=${{ inputs.instances }}|START=${RUN_START:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
             echo "Tailscale IP: $IP"
           else
             echo "::warning::not authorized yet - continuing, the watchdog keeps polling"
@@ -173,6 +184,13 @@ jobs:
           "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "emulator" "platform-tools" "$IMG" | tail -2
 
           N=${{ inputs.instances }}
+          # توزيع موارد الجهاز (4 vCPU / 16 GB) بأقصى كفاءة ممكنة
+          if [ "$N" -eq 1 ]; then MEM=6144; CORES=4
+          elif [ "$N" -eq 2 ]; then MEM=4608; CORES=2
+          else MEM=3072; CORES=2; fi
+          echo "EMU_MEM=$MEM" >> $GITHUB_ENV
+          echo "EMU_CORES=$CORES" >> $GITHUB_ENV
+          echo "resources per instance: ${MEM}MB RAM / ${CORES} cores"
           for i in $(seq 0 $((N-1))); do
             NAME="emu$i"
             echo no | "$SDK/cmdline-tools/latest/bin/avdmanager" create avd \
@@ -180,11 +198,11 @@ jobs:
                        -p "$ANDROID_AVD_HOME/$NAME.avd" >/dev/null
             INI="$ANDROID_AVD_HOME/$NAME.avd/config.ini"
             [ -f "$INI" ] || { echo "AVD creation failed for $NAME"; exit 1; }
-            sed -i -E '/^(hw\.ramSize|hw\.cpu\.ncore|vm\.heapSize|disk\.dataPartition|hw\.gpu\.|hw\.lcd\.)/d' "$INI"
+            sed -i -E '/^(hw\.ramSize|hw\.cpu\.ncore|vm\.heapSize|disk\.dataPartition|hw\.gpu\.|hw\.lcd\.|hw\.keyboard)/d' "$INI"
             printf '%s\n' \
-              'hw.ramSize=2048' 'vm.heapSize=256' 'hw.cpu.ncore=2' \
+              "hw.ramSize=$MEM" 'vm.heapSize=512' "hw.cpu.ncore=$CORES" \
               'hw.gpu.enabled=yes' 'hw.gpu.mode=swiftshader_indirect' \
-              'disk.dataPartition.size=3G' \
+              'disk.dataPartition.size=6G' 'hw.keyboard=yes' \
               'hw.lcd.width=720' 'hw.lcd.height=1280' 'hw.lcd.density=320' >> "$INI"
           done
           echo "AVDs created: $N"
@@ -197,12 +215,14 @@ jobs:
           for i in $(seq 0 $((N-1))); do
             CONSOLE=$((5554 + i*2))
             nohup "$SDK/emulator/emulator" -avd "emu$i" \
-              -no-window -no-audio -no-boot-anim -no-snapshot -no-metrics \
-              -gpu swiftshader_indirect -accel on -memory 2048 -cores 2 \
+              -no-window -no-audio -no-boot-anim -no-metrics \
+              -no-snapshot-save -no-snapshot-load -wipe-data \
+              -gpu swiftshader_indirect -accel on \
+              -memory ${EMU_MEM:-6144} -cores ${EMU_CORES:-4} \
               -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full \
               -port $CONSOLE -camera-back none -camera-front none \
               > "/tmp/emu$i.log" 2>&1 &
-            echo "emu$i -> console $CONSOLE"
+            echo "emu$i -> console $CONSOLE (${EMU_CORES:-4} cores, ${EMU_MEM:-6144}MB)"
           done
 
       - name: Wait for boot
@@ -474,7 +494,7 @@ jobs:
             echo "> إعدادات الأداء: AVD 720×1280 · سطح مكتب 1280×720 · xrdp 16-bit · compositing معطّل."
             echo "> تُحذف الآلة عند سقف 6 ساعات."
           } | tee -a $GITHUB_STEP_SUMMARY
-          publish "IP=$TS_IP|SLOT=${{ inputs.slot }}|RUN=$GITHUB_RUN_ID|INSTANCES=$N|START=$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAC=52:54:00:12:34:56|PORTS=15555,15557,15559"
+          publish "STATE=ready|IP=$TS_IP|SLOT=${{ inputs.slot }}|RUN=$GITHUB_RUN_ID|INSTANCES=$N|START=${RUN_START:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}|MAC=52:54:00:12:34:56|PORTS=15555,15557,15559|ANDROID=${{ inputs.api_level }}|CORES=${EMU_CORES:-4}|MEM=${EMU_MEM:-6144}"
 
       # ── 11. Watchdog: يحيي المحاكي و xrdp إن سقطا ────────────────────────
       - name: Keep alive
@@ -506,14 +526,26 @@ jobs:
               if ! pgrep -f "\-avd emu$i" >/dev/null; then
                 echo "[$(date +%H:%M:%S)] emu$i dead -> restart"
                 nohup "$SDK/emulator/emulator" -avd "emu$i" -no-window -no-audio \
-                  -no-boot-anim -no-snapshot -no-metrics -gpu swiftshader_indirect -accel on \
+                  -no-boot-anim -no-metrics -no-snapshot-save -no-snapshot-load \
+                  -gpu swiftshader_indirect -accel on \
                   -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full \
-                  -memory 2048 -cores 2 -port $((5554 + i*2)) >> "/tmp/emu$i.log" 2>&1 &
-                sleep 20
-                "$SDK/platform-tools/adb" -s "emulator-$((5554 + i*2))" shell "svc wifi disable" >/dev/null 2>&1 || true
+                  -memory ${EMU_MEM:-6144} -cores ${EMU_CORES:-4} \
+                  -port $((5554 + i*2)) >> "/tmp/emu$i.log" 2>&1 &
+                DEV="emulator-$((5554 + i*2))"
+                for t in $(seq 1 60); do
+                  [ "$("$SDK/platform-tools/adb" -s "$DEV" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
+                  sleep 5
+                done
+                "$SDK/platform-tools/adb" -s "$DEV" shell "svc wifi disable; settings put global wifi_on 0" >/dev/null 2>&1 || true
+                "$SDK/platform-tools/adb" -s "$DEV" root >/dev/null 2>&1 || true
+                sleep 3
+                "$SDK/platform-tools/adb" -s "$DEV" shell "cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.threebutton; settings put secure navigation_mode 0" >/dev/null 2>&1 || true
               fi
+              EXT=$((15555 + i*2)); INT=$((5555 + i*2))
+              ss -ltn 2>/dev/null | grep -q ":$EXT " || \
+                nohup socat TCP-LISTEN:$EXT,fork,reuseaddr TCP:127.0.0.1:$INT >> "/tmp/socat$i.log" 2>&1 &
             done
             sudo systemctl is-active --quiet xrdp || sudo systemctl restart xrdp
-            echo "[$(date +%H:%M:%S)] qemu=$(pgrep -fc qemu-system-x86_64 || echo 0) xrdp=$(systemctl is-active xrdp)"
+            echo "[$(date +%H:%M:%S)] qemu=$(pgrep -fc qemu-system-x86_64 || echo 0) xrdp=$(systemctl is-active xrdp) mem=$(free -m | awk '/Mem:/{print $3\"MB used\"}')"
             sleep 120
           done
