@@ -48,14 +48,16 @@ case "${1:-help}" in
   mac)
     NEW=$(echo "${2:-}" | tr 'a-f' 'A-F')
     echo "$NEW" | grep -qE '^([0-9A-F]{2}:){5}[0-9A-F]{2}$' || { echo "bad mac (XX:XX:XX:XX:XX:XX)"; exit 2; }
+    IFACE=$("$ADB" -s "$DEV" shell "ip -o link show" 2>/dev/null | grep -oE '(eth0|radio0)' | head -1)
+    IFACE=${IFACE:-eth0}
     "$ADB" -s "$DEV" root >/dev/null 2>&1 || true
     sleep 2
-    "$ADB" -s "$DEV" shell "su 0 ip link set eth0 down" >/dev/null 2>&1 || true
-    "$ADB" -s "$DEV" shell "su 0 ip link set eth0 address $NEW" >/dev/null 2>&1
-    "$ADB" -s "$DEV" shell "su 0 ip link set eth0 up" >/dev/null 2>&1 || true
+    "$ADB" -s "$DEV" shell "su 0 ip link set $IFACE down" >/dev/null 2>&1 || true
+    "$ADB" -s "$DEV" shell "su 0 ip link set $IFACE address $NEW" >/dev/null 2>&1
+    "$ADB" -s "$DEV" shell "su 0 ip link set $IFACE up" >/dev/null 2>&1 || true
     sleep 1
-    GOT=$("$ADB" -s "$DEV" shell "ip -o link show eth0" 2>/dev/null | grep -oE 'link/ether [0-9a-fA-F:]+' | awk '{print $2}')
-    echo "mac($NEW) = ${GOT:-?}"
+    GOT=$("$ADB" -s "$DEV" shell "ip -o link show $IFACE" 2>/dev/null | grep -oE 'link/ether [0-9a-fA-F:]+' | awk '{print $2}')
+    echo "iface=$IFACE mac($NEW) = ${GOT:-?}"
     ;;
   aid)
     echo "${2:-}" | grep -qE '^[0-9a-f]{16}$' || { echo "android_id must be 16 lowercase hex"; exit 2; }
@@ -145,6 +147,27 @@ case "${1:-help}" in
     ;;
   pkgs)
     echo "enabled=$("$ADB" -s "$DEV" shell pm list packages -e 2>/dev/null | wc -l) disabled=$("$ADB" -s "$DEV" shell pm list packages -d 2>/dev/null | wc -l)"
+    ;;
+  probe)
+    IFACE=$("$ADB" -s "$DEV" shell "ip -o link show" 2>/dev/null | grep -oE '(eth0|radio0)' | head -1)
+    IFACE=${IFACE:-eth0}
+    MAC=$("$ADB" -s "$DEV" shell "ip -o link show $IFACE" 2>/dev/null | grep -oE 'link/ether [0-9a-fA-F:]+' | awk '{print $2}')
+    AID=$("$ADB" -s "$DEV" shell settings get secure android_id 2>/dev/null | tr -d '\r')
+    SER=$("$ADB" -s "$DEV" shell getprop ro.serialno 2>/dev/null | tr -d '\r')
+    REL=$("$ADB" -s "$DEV" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')
+    echo "mac=${MAC:-}"
+    echo "aid=${AID:-}"
+    echo "serial=${SER:-}"
+    echo "android=${REL:-}"
+    echo "iface=${IFACE}"
+    ;; 
+  imei-read)
+    "$ADB" -s "$DEV" root >/dev/null 2>&1 || true
+    sleep 2
+    R=$("$ADB" -s "$DEV" shell "service call iphonesubinfo 1 s16 com.android.shell" 2>/dev/null)
+    F=$(echo "$R" | grep -oE '[0-9]{15}' | head -1)
+    echo "imei_from_android=${F:-unreadable}"
+    echo "imei_configured=$(cat /opt/android-server/imei-$IDX 2>/dev/null || echo '?')"
     ;;
   *)
     echo "ctl.sh {stats|geo LAT LON|geo-off|proxy HOST:PORT|proxy off|mac XX:..|aid HEX16|imei 15digits|imei-show|read-imei|root|nav|play|chrome|settings|install FILE|shot [OUT]|key CODE|tap X Y|swipe X1 Y1 X2 Y2 [MS]|type TEXT|reboot|reboot-emulator|pkgs}"

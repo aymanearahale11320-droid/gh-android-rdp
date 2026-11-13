@@ -504,7 +504,13 @@ jobs:
               nohup socat TCP-LISTEN:$EXT,fork,reuseaddr TCP:127.0.0.1:$INT > "/tmp/socat$i.log" 2>&1 &
             fi
           done
-          echo "ctl.sh ready"; ss -ltn | grep -E ':(1555[0-9])' || true
+          # كشف adb SERVER الخاص بالمضيف (المصرّح مسبقًا) — يتجاوز مصادقة adbd
+          # في صور Play Store حيث ro.adb.secure=1. الواجهة/scrcpy تتصل به مباشرة.
+          if ! ss -ltn 2>/dev/null | grep -q ':15037 '; then
+            nohup socat TCP-LISTEN:15037,fork,reuseaddr TCP:127.0.0.1:5037 > /tmp/socat-adb.log 2>&1 &
+          fi
+          sleep 1
+          echo "ctl.sh ready"; ss -ltn | grep -E ':(1555[0-9]|15037)' || true
 
       # ── 12. جلسة RDP (اختياري) ───────────────────────────────────────────
       - name: RDP session (optional)
@@ -540,7 +546,8 @@ jobs:
           publish_set STATE=ready IP="${TS_IP:-}" SLOT=${{ inputs.slot }} RUN=${GITHUB_RUN_ID} \
             START="$START" INSTANCES="$N" MODE="$MODE" ROOT="$ROOT" DESKTOP="$DESK" \
             ANDROID="$API" IMAGE="$IMG_TAG" PORTS="$PORTS" CORES="$CORES" MEM="$MEM" \
-            IMEI="$IMEI_VAL" HOST="$HOST_NAME" READY_AT="$NOW" UPDATED="$NOW"
+            IMEI="$IMEI_VAL" HOST="$HOST_NAME" ADB_SERVER=15037 \
+            READY_AT="$NOW" UPDATED="$NOW"
 
       # ── 14. Watchdog ─────────────────────────────────────────────────────
       - name: Watchdog
@@ -568,6 +575,9 @@ jobs:
                 nohup socat TCP-LISTEN:$EXT,fork,reuseaddr TCP:127.0.0.1:$(( 5555 + i * 2 )) >> "/tmp/socat$i.log" 2>&1 &
               fi
             done
+            if ! ss -ltn 2>/dev/null | grep -q ':15037 '; then
+              nohup socat TCP-LISTEN:15037,fork,reuseaddr TCP:127.0.0.1:5037 >> /tmp/socat-adb.log 2>&1 &
+            fi
             systemctl is-active --quiet ssh || sudo systemctl restart ssh 2>/dev/null || true
             if [ "$DESK" = "true" ]; then
               systemctl is-active --quiet xrdp || sudo systemctl restart xrdp 2>/dev/null || true
