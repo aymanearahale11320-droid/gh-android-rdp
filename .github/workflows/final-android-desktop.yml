@@ -330,11 +330,12 @@ jobs:
             '  geo)    $ADB -s $DEV emu geo fix "$3" "$2"; echo "GPS => lat=$2 lon=$3";;' \
             '  proxy)  if [ "$2" = off ]; then $ADB -s $DEV shell settings put global http_proxy :0; echo proxy=off; else $ADB -s $DEV shell settings put global http_proxy "$2"; echo "proxy=$2"; fi;;' \
             '  ip)     $ADB -s $DEV shell ip -4 addr show | grep inet;;' \
+            '  mac)    $ADB -s $DEV root >/dev/null 2>&1; sleep 2; $ADB -s $DEV shell ip link set eth0 address "$2"; $ADB -s $DEV shell ip link show eth0 | head -1;;' \
             '  chrome) $ADB -s $DEV shell am start -n com.android.chrome/com.google.android.apps.chrome.Main;;' \
             '  install) $ADB -s $DEV install -r "$2";;' \
             '  shot)   $ADB -s $DEV exec-out screencap -p > "${2:-$HOME/screen.png}"; echo "$2 saved";;' \
             '  reboot) $ADB -s $DEV reboot;;' \
-            '  *)      echo "استخدام: android-ctl.sh {root|nav|geo LAT LON|proxy HOST:PORT|proxy off|ip|chrome|install APK|shot FILE|reboot}";;' \
+            '  *)      echo "استخدام: android-ctl.sh {root|nav|geo LAT LON|proxy HOST:PORT|proxy off|ip|mac XX:XX:XX:XX:XX:XX|chrome|install APK|shot FILE|reboot}";;' \
             'esac' > ~/bin/android-ctl.sh
           chmod +x ~/bin/android-ctl.sh
           echo "ready: ~/bin/android-ctl.sh"
