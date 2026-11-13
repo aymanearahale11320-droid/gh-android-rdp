@@ -116,7 +116,7 @@ jobs:
       # ── 5. الفتح للـtailnet فقط، وإغلاق كل شيء آخر ───────────────────────
       - name: Firewall (tailnet only)
         run: |
-          for p in 3389 15555 15557 15559; do
+          for p in 22 3389 15555 15557 15559; do
             sudo iptables -A INPUT -i tailscale0 -p tcp --dport $p -j ACCEPT
           done
           sudo iptables -A INPUT -p tcp --dport 3389 -j DROP
@@ -162,6 +162,7 @@ jobs:
             nohup "$SDK/emulator/emulator" -avd "emu$i" \
               -no-window -no-audio -no-boot-anim -no-snapshot -no-metrics \
               -gpu swiftshader_indirect -accel on -memory 2048 -cores 2 \
+              -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full \
               -port $CONSOLE -camera-back none -camera-front none \
               > "/tmp/emu$i.log" 2>&1 &
             echo "emu$i -> console $CONSOLE"
@@ -170,15 +171,38 @@ jobs:
       - name: Wait for boot
         run: |
           export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          "$SDK/platform-tools/adb" start-server
+          ADB="$SDK/platform-tools/adb"
+          N=${{ inputs.instances }}
+          "$ADB" start-server
           START=$(date +%s)
           for i in $(seq 1 90); do
-            if [ "$("$SDK/platform-tools/adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+            if [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
               echo "booted in $(( $(date +%s) - START ))s"; break
             fi
             sleep 5
           done
-          "$SDK/platform-tools/adb" devices -l
+
+          # الواي-فاي الوهمي (AndroidWifi) يسرق المسار الافتراضي بلا DNS سليم
+          # -> نعطّله ليبقى eth0 (خلية LTE) هو المسار الوحيد للإنترنت
+          for i in $(seq 0 $((N-1))); do
+            DEV="emulator-$((5554 + i*2))"
+            "$ADB" -s "$DEV" shell "svc wifi disable; settings put global wifi_on 0; settings put global airplane_mode_on 0" 2>/dev/null || true
+            sleep 2
+            "$ADB" -s "$DEV" shell "cmd connectivity airplane-mode disable" 2>/dev/null || true
+          done
+
+          "$ADB" devices -l
+
+          # تحقق فعلي من الإنترنت داخل الأندرويد (TCP وليس ping: Azure يحجب ICMP)
+          for i in $(seq 0 $((N-1))); do
+            DEV="emulator-$((5554 + i*2))"
+            for t in $(seq 1 10); do
+              if "$ADB" -s "$DEV" shell "printf 'GET / HTTP/1.0\r\nHost: one.one.one.one\r\n\r\n' | nc -w 6 1.1.1.1 80" 2>/dev/null | grep -q 'HTTP/'; then
+                echo "$DEV: internet OK"; break
+              fi
+              echo "$DEV: waiting for internet ($t/10)"; sleep 5
+            done
+          done
           tail -5 /tmp/emu0.log || true
 
       # ── 8. ADB عبر tailnet (لـscrcpy من جهازك) ───────────────────────────
@@ -224,12 +248,39 @@ jobs:
           export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           echo "export PATH=\$PATH:$SDK/platform-tools" | sudo tee /etc/profile.d/android.sh >/dev/null
 
-          # نافذة Android تفتح تلقائيًا داخل السطح المكتب
-          mkdir -p ~/.config/autostart
+          # نافذة Android تلقائيًا داخل السطح المكتب (سكربت منفصل: يمنع مشاكل اقتباس Exec)
+          mkdir -p ~/bin ~/.config/autostart
+          cat > ~/bin/android-mirror.sh <<EOF
+#!/bin/sh
+export PATH="\$PATH:$SDK/platform-tools"
+LOG="\$HOME/scrcpy-desktop.log"
+echo "=== \$(date) start ===" >> "\$LOG"
+adb start-server >> "\$LOG" 2>&1
+while true; do
+  for i in \$(seq 1 60); do
+    adb devices | grep -q 'emulator-5554' && break
+    sleep 2
+  done
+  adb devices >> "\$LOG" 2>&1
+  scrcpy -s emulator-5554 --max-size 720 --max-fps 30 --video-bit-rate 2M --no-audio --window-title Android >> "\$LOG" 2>&1
+  echo "=== \$(date) scrcpy exited - retry in 5s ===" >> "\$LOG"
+  sleep 5
+done
+EOF
+          chmod +x ~/bin/android-mirror.sh
           printf '%s\n' \
-            '[Desktop Entry]' 'Type=Application' 'Name=Android' \
-            'Exec=bash -lc "sleep 8; scrcpy --max-size 720 --max-fps 30 --video-bit-rate 2M --no-audio --window-title Android"' \
+            '[Desktop Entry]' 'Type=Application' 'Name=Android mirror' \
+            'Exec=/home/runner/bin/android-mirror.sh' \
             'Terminal=false' 'X-GNOME-Autostart-enabled=true' > ~/.config/autostart/android.desktop
+
+          # SSH عبر الـtailnet (تشخيص مباشر)
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq openssh-server >/dev/null 2>&1 || true
+          sudo sed -i -E 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i -E 's/^#?KbdInteractiveAuthentication .*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
+          grep -q '^PasswordAuthentication yes' /etc/ssh/sshd_config || echo 'PasswordAuthentication yes' | sudo tee -a /etc/ssh/sshd_config >/dev/null
+          sudo systemctl enable ssh >/dev/null 2>&1 || true
+          sudo systemctl restart ssh 2>/dev/null || sudo systemctl restart sshd 2>/dev/null || true
+          sudo systemctl is-active ssh 2>/dev/null || sudo systemctl is-active sshd 2>/dev/null || true
 
           # لا سبات ولا قفل شاشة
           xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-enabled -n -t bool -s false 2>/dev/null || true
@@ -264,6 +315,7 @@ jobs:
             echo "| User | \`runner\` |"
             echo "| Password | \`$RDP_PASS_PLAIN\` |"
             echo "| ADB (من جهازك) | \`adb connect $TS_IP:15555\` ثم \`scrcpy\` |"
+            echo "| SSH | \`ssh runner@$TS_IP\` (نفس كلمة السر) |"
             echo "| Instances | $N (منافذ 15555 / 15557 / 15559) |"
             if [ -n "$LOGIN_URL" ]; then echo "| Tailscale | [$LOGIN_URL]($LOGIN_URL) |"; fi
             echo ""
@@ -302,8 +354,10 @@ jobs:
                 echo "[$(date +%H:%M:%S)] emu$i dead -> restart"
                 nohup "$SDK/emulator/emulator" -avd "emu$i" -no-window -no-audio \
                   -no-boot-anim -no-snapshot -no-metrics -gpu swiftshader_indirect -accel on \
+                  -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full \
                   -memory 2048 -cores 2 -port $((5554 + i*2)) >> "/tmp/emu$i.log" 2>&1 &
                 sleep 20
+                "$SDK/platform-tools/adb" -s "emulator-$((5554 + i*2))" shell "svc wifi disable" >/dev/null 2>&1 || true
               fi
             done
             sudo systemctl is-active --quiet xrdp || sudo systemctl restart xrdp
