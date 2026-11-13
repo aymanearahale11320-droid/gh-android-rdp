@@ -231,6 +231,7 @@ jobs:
             'export XDG_CURRENT_DESKTOP=XFCE' \
             'xset s off; xset -dpms; xset s noblank' \
             '( sleep 4; xrandr -s 1280x720 2>/dev/null || xrandr --fb 1280x720 2>/dev/null || true ) &' \
+            '[ -x "$HOME/bin/android-mirror.sh" ] && ( sleep 6; exec "$HOME/bin/android-mirror.sh" ) &' \
             'exec dbus-launch --sh-syntax --exit-with-session startxfce4' > ~/.xsession
           chmod +x ~/.xsession
 
@@ -249,28 +250,26 @@ jobs:
           echo "export PATH=\$PATH:$SDK/platform-tools" | sudo tee /etc/profile.d/android.sh >/dev/null
 
           # نافذة Android تلقائيًا داخل السطح المكتب (سكربت منفصل: يمنع مشاكل اقتباس Exec)
-          mkdir -p ~/bin ~/.config/autostart
+          mkdir -p ~/bin
           printf '%s\n' \
             '#!/bin/sh' \
             "export PATH=\"\$PATH:$SDK/platform-tools\"" \
             'LOG="$HOME/scrcpy-desktop.log"' \
             'echo "=== $(date) start ===" >> "$LOG"' \
             'adb start-server >> "$LOG" 2>&1' \
+            'VER=$(scrcpy --version 2>/dev/null | head -1 | sed -n "s/.*scrcpy \([0-9]*\)\..*/\1/p")' \
+            'if [ "${VER:-1}" -ge 2 ]; then EXTRA="--no-audio --video-bit-rate=2M"; else EXTRA="--bit-rate=2M"; fi' \
+            'echo "scrcpy major=$VER extra=$EXTRA" >> "$LOG"' \
             'while true; do' \
             '  for i in $(seq 1 60); do' \
             '    adb devices | grep -q emulator-5554 && break' \
             '    sleep 2' \
             '  done' \
-            '  adb devices >> "$LOG" 2>&1' \
-            '  scrcpy -s emulator-5554 --max-size 720 --max-fps 30 --video-bit-rate 2M --no-audio --window-title Android >> "$LOG" 2>&1' \
+            '  scrcpy -s emulator-5554 --max-size=720 --max-fps=30 $EXTRA --window-title=Android >> "$LOG" 2>&1' \
             '  echo "=== $(date) scrcpy exited - retry in 5s ===" >> "$LOG"' \
             '  sleep 5' \
             'done' > ~/bin/android-mirror.sh
           chmod +x ~/bin/android-mirror.sh
-          printf '%s\n' \
-            '[Desktop Entry]' 'Type=Application' 'Name=Android mirror' \
-            'Exec=/home/runner/bin/android-mirror.sh' \
-            'Terminal=false' 'X-GNOME-Autostart-enabled=true' > ~/.config/autostart/android.desktop
 
           # SSH عبر الـtailnet (تشخيص مباشر)
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq openssh-server >/dev/null 2>&1 || true
