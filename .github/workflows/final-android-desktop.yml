@@ -250,23 +250,22 @@ jobs:
 
           # نافذة Android تلقائيًا داخل السطح المكتب (سكربت منفصل: يمنع مشاكل اقتباس Exec)
           mkdir -p ~/bin ~/.config/autostart
-          cat > ~/bin/android-mirror.sh <<EOF
-#!/bin/sh
-export PATH="\$PATH:$SDK/platform-tools"
-LOG="\$HOME/scrcpy-desktop.log"
-echo "=== \$(date) start ===" >> "\$LOG"
-adb start-server >> "\$LOG" 2>&1
-while true; do
-  for i in \$(seq 1 60); do
-    adb devices | grep -q 'emulator-5554' && break
-    sleep 2
-  done
-  adb devices >> "\$LOG" 2>&1
-  scrcpy -s emulator-5554 --max-size 720 --max-fps 30 --video-bit-rate 2M --no-audio --window-title Android >> "\$LOG" 2>&1
-  echo "=== \$(date) scrcpy exited - retry in 5s ===" >> "\$LOG"
-  sleep 5
-done
-EOF
+          printf '%s\n' \
+            '#!/bin/sh' \
+            "export PATH=\"\$PATH:$SDK/platform-tools\"" \
+            'LOG="$HOME/scrcpy-desktop.log"' \
+            'echo "=== $(date) start ===" >> "$LOG"' \
+            'adb start-server >> "$LOG" 2>&1' \
+            'while true; do' \
+            '  for i in $(seq 1 60); do' \
+            '    adb devices | grep -q emulator-5554 && break' \
+            '    sleep 2' \
+            '  done' \
+            '  adb devices >> "$LOG" 2>&1' \
+            '  scrcpy -s emulator-5554 --max-size 720 --max-fps 30 --video-bit-rate 2M --no-audio --window-title Android >> "$LOG" 2>&1' \
+            '  echo "=== $(date) scrcpy exited - retry in 5s ===" >> "$LOG"' \
+            '  sleep 5' \
+            'done' > ~/bin/android-mirror.sh
           chmod +x ~/bin/android-mirror.sh
           printf '%s\n' \
             '[Desktop Entry]' 'Type=Application' 'Name=Android mirror' \
