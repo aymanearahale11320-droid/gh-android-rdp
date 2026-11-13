@@ -1,31 +1,45 @@
-name: final-android-desktop
+name: android-server
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Ubuntu 24.04 + KVM + Android emulator + سطح مكتب xfce + Chrome
-#
-#  بعد التشغيل:
-#    RDP  ->  <IP>:3389   user: runner   pass: في Summary
-#    داخل السطح المكتب: نافذة Android تفتح تلقائيًا (scrcpy) + Chrome للتحميل
-#    من جهازك مباشرة (بدون RDP): adb connect <IP>:5555 && scrcpy
-#
-#  الحد الصلب: 6 ساعات لكل job على GitHub-hosted (لا يمكن تجاوزه).
+#  سيرفر أندرويد كامل على GitHub Actions
+#  play : صورة google_apis_playstore → Google Play عامل (بلا روت)
+#  root : صورة google_apis → adb root كامل (تغيير MAC/AndroidID)
+#  desktop=false (الافتراضي) → سطح المكتب اللينكس معطّل وكل الموارد للمحاكي
+#  IMEI: ترقيع ثابت qemu → هوية جهاز فريدة لكل سيرفر (يعمل في الوضعين)
+#  الحد الصلب: 6 ساعات لكل job على GitHub-hosted (لا يمكن تجاوزه)
 # ═══════════════════════════════════════════════════════════════════════════
 
 on:
   workflow_dispatch:
     inputs:
-      instances:
-        description: "Emulator instances (1-3)"
+      slot:
+        description: "Slot (1-10) — كل slot سيرفر مستقل"
         default: "1"
+        required: false
+      instances:
+        description: "عدد المحاكيات في هذا السيرفر (1-3)"
+        default: "1"
+        required: false
       api_level:
         description: "Android API level (30 = Android 11)"
         default: "30"
-      image_type:
-        description: "google_apis (root) | google_apis_playstore (Play Store)"
-        default: "google_apis"
-      slot:
-        description: "Slot number (1-10) — كل slot = سيرفر مستقل يعمل بالتوازي"
-        default: "1"
+        required: false
+      mode:
+        description: "play = Google Play (بلا روت) | root = روت كامل (بلا Play)"
+        default: "play"
+        required: false
+      desktop:
+        description: "true = سطح مكتب لينكس + RDP | false = المحاكي فقط (أسرع)"
+        default: "false"
+        required: false
+      password:
+        description: "كلمة سر هذا السيرفر (فارغة = عشوائية)"
+        default: ""
+        required: false
+      imei:
+        description: "IMEI مخصص 15 رقمًا (فارغ = فريد تلقائيًا لك سيرفر)"
+        default: ""
+        required: false
 
 concurrency:
   group: android-session-${{ inputs.slot }}
@@ -35,242 +49,373 @@ permissions:
   contents: write
 
 jobs:
-  android:
+  server:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
 
     steps:
       - uses: actions/checkout@v4
 
-      # ── 0. إعلان البدء فورًا (لتظهر النسخة في التطبيق أثناء التجهيز) ──────
-      - name: Announce start
+      # ── 0. تهيئة فورية + إعلان البدء ─────────────────────────────────────
+      - name: Init & announce
         env:
           GH_TOKEN: ${{ github.token }}
-          STATUS_FILE: status-${{ inputs.slot }}.txt
         run: |
-          sed -i '1s/^\xEF\xBB\xBF//' .github/scripts/publish.sh 2>/dev/null || true
-          source .github/scripts/publish.sh
-          echo "RUN_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
-          publish "STATE=starting|SLOT=${{ inputs.slot }}|RUN=$GITHUB_RUN_ID|INSTANCES=${{ inputs.instances }}|START=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          set -uo pipefail
+          N=${{ inputs.instances }}
+          MODE=${{ inputs.mode }}
+          DESK=${{ inputs.desktop }}
+          API=${{ inputs.api_level }}
+          UNAME=runner
+          START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-      # ── 1. KVM: التسريع الحقيقي ──────────────────────────────────────────
+          if [ "$MODE" = "root" ]; then IMG_TAG=google_apis; ROOT=1
+          else IMG_TAG=google_apis_playstore; ROOT=0; fi
+          IMG="system-images;android-${API};${IMG_TAG};x86_64"
+
+          if [ "$DESK" = "true" ]; then HOST_RESERVE=2048; else HOST_RESERVE=1024; fi
+          TOTAL=$(( 16384 - HOST_RESERVE ))
+          if [ "$N" -eq 1 ]; then CORES=4
+          elif [ "$N" -eq 2 ]; then CORES=2
+          else CORES=1; fi
+          MEM=$(( (TOTAL / N) / 512 * 512 ))
+          if [ "$MEM" -gt 8192 ]; then MEM=8192; fi
+
+          if [ -n "${{ inputs.imei }}" ]; then
+            IMEI_VAL="${{ inputs.imei }}"
+          else
+            BODY="35$(for i in $(seq 12); do printf '%d' $((RANDOM % 10)); done)"
+            SUM=0
+            for i in $(seq 0 13); do
+              D=${BODY:$i:1}
+              if [ $((i % 2)) -eq 1 ]; then D=$((D * 2)); [ "$D" -gt 9 ] && D=$((D - 9)); fi
+              SUM=$((SUM + D))
+            done
+            IMEI_VAL="${BODY}$(( (10 - SUM % 10) % 10 ))"
+          fi
+
+          {
+            echo "N=$N"; echo "MODE=$MODE"; echo "DESK=$DESK"; echo "API=$API"
+            echo "IMG_TAG=$IMG_TAG"; echo "IMG=$IMG"; echo "ROOT=$ROOT"
+            echo "CORES=$CORES"; echo "MEM=$MEM"; echo "IMEI_VAL=$IMEI_VAL"
+            echo "START=$START"; echo "UNAME=$UNAME"
+            echo "STATUS_FILE=status-${{ inputs.slot }}.txt"
+            echo "HOST_NAME=gh-android-${GITHUB_RUN_ID}"
+          } >> "$GITHUB_ENV"
+
+          source .github/scripts/publish.sh
+          publish_set STATE=starting SLOT=${{ inputs.slot }} RUN=${GITHUB_RUN_ID} \
+            START="$START" INSTANCES="$N" MODE="$MODE" ROOT="$ROOT" \
+            DESKTOP="$DESK" ANDROID="$API" IMAGE="$IMG_TAG" CORES="$CORES" \
+            MEM="$MEM" IMEI="$IMEI_VAL" HOST="gh-android-${GITHUB_RUN_ID}" UPDATED="$START"
+          echo "build: $MODE/api$API · ${N}x(${CORES}c/${MEM}MB) · imei=$IMEI_VAL"
+
+      # ── 1. KVM ───────────────────────────────────────────────────────────
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
 
-      # ── 2. تحرير القرص (14 GB -> ~30 GB) ─────────────────────────────────
-      - name: Free disk
+      # ── 2. حزم النظام المطلوبة فقط ───────────────────────────────────────
+      - name: System packages
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
-                      /usr/local/lib/android/sdk/ndk "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
-          sudo docker image prune -af 2>/dev/null || true
-          sudo apt-get clean
-          df -h / | tail -1
+          NEED=""
+          command -v socat >/dev/null || NEED="$NEED socat"
+          dpkg -s openssh-server >/dev/null 2>&1 || NEED="$NEED openssh-server"
+          if [ -n "$NEED" ]; then
+            sudo apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq $NEED >/dev/null
+          fi
+          echo "socat=$(command -v socat || echo MISSING) sshd=$(command -v sshd || echo MISSING)"
 
-      # ── 3. تنظيف خدمات النظام + ضبط الأداء ───────────────────────────────
-      - name: Debloat & tune host
+      # ── 3. كاش صورة النظام (أكبر مكسب للسرعة بعد أول تشغيل) ──────────────
+      - name: Cache Android images
+        id: imgcache
+        uses: actions/cache/restore@v4
+        with:
+          path: /usr/local/lib/android/sdk/system-images
+          key: sysimg-${{ inputs.api_level }}-${{ inputs.mode }}-v4
+
+      # ── 4. SDK + AVD + IMEI + إطلاق المحاكي مبكرًا ───────────────────────
+      - name: Build AVDs and launch emulators
         run: |
-          # خدمات لا نحتاجها إطلاقًا في هذه الجلسة (تستهلك CPU/ذاكرة/قرص)
-          for s in snapd.service snapd.socket snapd.seeded.service \
-                   docker.service docker.socket containerd.service \
-                   unattended-upgrades.service apt-daily.service apt-daily-upgrade.service \
-                   apt-daily.timer apt-daily-upgrade.timer motd-news.service motd-news.timer \
-                   man-db.timer e2scrub_all.timer fwupd.service fwupd-refresh.service \
-                   ModemManager.service multipathd.service iscsid.service lvm2-monitor.service \
-                   ua-reboot-cmds.service ua-timer.timer apport.service; do
-            sudo systemctl disable --now "$s" >/dev/null 2>&1 || true
+          set -uo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          AM="$SDK/cmdline-tools/latest/bin/avdmanager"
+          AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$AVD_HOME"
+
+          T0=$(date +%s)
+          yes | "$SM" --licenses >/dev/null 2>&1 || true
+          "$SM" --install "emulator" "platform-tools" "$IMG" >/tmp/sdk.log 2>&1 \
+            || { tail -5 /tmp/sdk.log; exit 1; }
+          echo "sdk ready in $(( $(date +%s) - T0 ))s (cache_hit=${{ steps.imgcache.outputs.cache-hit }})"
+
+          for i in $(seq 0 $((N-1))); do
+            NAME="emu$i"
+            echo no | "$AM" create avd -n "$NAME" -k "$IMG" -d pixel_5 --force \
+              -p "$AVD_HOME/$NAME.avd" >/dev/null 2>&1 || true
+            INI="$AVD_HOME/$NAME.avd/config.ini"
+            [ -f "$INI" ] || { echo "AVD $NAME creation failed"; exit 1; }
+            sed -i -E '/^(hw\.ramSize|hw\.cpu\.ncore|vm\.heapSize|disk\.dataPartition|hw\.gpu\.|hw\.lcd\.|hw\.keyboard|hw\.mainKeys|hw\.audio|hw\.sdCard|PlayStore|tag\.)/d' "$INI"
+            printf '%s\n' \
+              "hw.ramSize=$MEM" 'vm.heapSize=512' "hw.cpu.ncore=$CORES" \
+              'hw.gpu.enabled=yes' 'hw.gpu.mode=swiftshader_indirect' \
+              'hw.keyboard=yes' 'hw.mainKeys=no' \
+              'hw.audioInput=none' 'hw.audioOutput=none' 'hw.sdCard=no' \
+              'hw.lcd.width=720' 'hw.lcd.height=1280' 'hw.lcd.density=320' \
+              'disk.dataPartition.size=8G' >> "$INI"
+            if [ "$MODE" = "play" ]; then
+              printf '%s\n' 'PlayStore.enabled=true' "tag.id=$IMG_TAG" 'tag.display=Google Play' >> "$INI"
+            else
+              printf '%s\n' 'PlayStore.enabled=false' "tag.id=$IMG_TAG" 'tag.display=Google APIs' >> "$INI"
+            fi
           done
-          sudo systemctl mask snapd.service snapd.socket >/dev/null 2>&1 || true
-          sudo umount -l /var/snap 2>/dev/null || true
 
-          # ضبط النواة: ذاكرة/IO/شفافية صفحات
-          sudo sysctl -w vm.swappiness=10 >/dev/null
-          sudo sysctl -w vm.dirty_ratio=15 >/dev/null
-          sudo sysctl -w vm.dirty_background_ratio=5 >/dev/null
-          sudo sysctl -w net.core.somaxconn=1024 >/dev/null
-          echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled >/dev/null 2>&1 || true
+          # IMEI: ترقيع ثابت qemu (سلسلة واحدة 358240051111110)
+          QEMU_REL="qemu/linux-x86_64/qemu-system-x86_64"
+          mkdir -p /opt/android-server
+          cp .github/scripts/patch-imei.py /opt/android-server/patch-imei.py
+          if [ "$N" -eq 1 ]; then
+            QEMU_BIN="$SDK/emulator/$QEMU_REL"
+            sudo cp "$QEMU_BIN" "$QEMU_BIN.bak" 2>/dev/null || true
+            sudo chmod u+w "$QEMU_BIN" 2>/dev/null || true
+            sudo python3 /opt/android-server/patch-imei.py "$QEMU_BIN" "$IMEI_VAL" || true
+            echo "LAUNCHER=$SDK/emulator/emulator" > /opt/android-server/inst-0.env
+            echo "QEMU=$QEMU_BIN" >> /opt/android-server/inst-0.env
+          else
+            for i in $(seq 0 $((N-1))); do
+              DEST="/opt/emu/$i"
+              rm -rf "$DEST"; mkdir -p /opt/emu
+              cp -al "$SDK/emulator" "$DEST"
+              rm -f "$DEST/$QEMU_REL"
+              cp "$SDK/emulator/$QEMU_REL" "$DEST/$QEMU_REL"
+              python3 /opt/android-server/patch-imei.py "$DEST/$QEMU_REL" "$IMEI_VAL" || true
+              echo "LAUNCHER=$DEST/emulator" > /opt/android-server/inst-$i.env
+              echo "QEMU=$DEST/$QEMU_REL" >> /opt/android-server/inst-$i.env
+            done
+          fi
+          echo "imei $IMEI_VAL hits in qemu: $(grep -a -c "$IMEI_VAL" "$SDK/emulator/$QEMU_REL" 2>/dev/null || echo 0)"
 
-          # حاكم ترددات الأداء إن وُجد
-          for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-            [ -w "$g" ] && echo performance | sudo tee "$g" >/dev/null 2>&1
+          # إطلاق مبكر: يعمل المحاكي بينما نكمل tailscale/ssh
+          for i in $(seq 0 $((N-1))); do
+            . /opt/android-server/inst-$i.env
+            PORT=$(( 5554 + i * 2 ))
+            EXT=$(( 15555 + i * 2 ))
+            nohup env ANDROID_SDK_ROOT="$SDK" ANDROID_AVD_HOME="$AVD_HOME" \
+              "$LAUNCHER" -avd "emu$i" \
+              -no-window -no-audio -no-boot-anim -no-metrics -no-snapshot \
+              -gpu swiftshader_indirect -accel on \
+              -memory "$MEM" -cores "$CORES" \
+              -dns-server 1.1.1.1,8.8.8.8 -netdelay none -netspeed full \
+              -port "$PORT" -camera-back none -camera-front none \
+              > /tmp/emu$i.log 2>&1 &
+            echo "emu$i launched (console $PORT, host $EXT)"
           done
+          sleep 4
+          pgrep -af qemu-system | head -3 || { echo "emulator died"; tail -30 /tmp/emu0.log; exit 1; }
+          echo "done in $(( $(date +%s) - T0 ))s"
 
-          sudo journalctl --vacuum-size=20M >/dev/null 2>&1 || true
-          echo "host debloated · running services: $(systemctl list-units --type=service --state=running --no-legend | wc -l)"
-          free -m | head -2
+      - name: Save image cache
+        if: steps.imgcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /usr/local/lib/android/sdk/system-images
+          key: sysimg-${{ inputs.api_level }}-${{ inputs.mode }}-v4
 
-      # ── 4. سطح المكتب + Chrome + أدوات ───────────────────────────────────
-      - name: Install desktop stack
-        run: |
-          sudo apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq \
-            xfce4 xfce4-terminal thunar dbus-x11 xrdp ssl-cert \
-            socat unzip wget curl scrcpy >/dev/null
-
-          # Chrome الرسمي (وليس snap) — يعمل على 24.04 بلا مشاكل
-          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-            && sudo apt-get install -y -qq /tmp/chrome.deb >/dev/null \
-            || echo "Chrome install failed, falling back to xfce browser"
-
-          sudo adduser xrdp ssl-cert >/dev/null 2>&1 || true
-          echo "desktop stack done"
-
-      # ── 4. Tailscale ─────────────────────────────────────────────────────
+      # ── 5. Tailscale (متوازٍ مع إقلاع المحاكي) ───────────────────────────
       - name: Tailscale
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
           GH_TOKEN: ${{ github.token }}
-          STATUS_FILE: status-${{ inputs.slot }}.txt
         run: |
-          sed -i '1s/^\xEF\xBB\xBF//' .github/scripts/publish.sh 2>/dev/null || true
+          set -uo pipefail
           source .github/scripts/publish.sh
-          curl -fsSL https://tailscale.com/install.sh | sh
-          HOST="gh-android-$GITHUB_RUN_ID"
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
+          HOST="$HOST_NAME"
           URL=""
-
           if [ -n "$TS_AUTHKEY" ]; then
             sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="$HOST" --accept-dns=false || true
           else
             sudo bash -c "nohup tailscale up --hostname=$HOST --accept-dns=false >/tmp/ts.log 2>&1 &"
             for i in $(seq 1 40); do
               grep -q 'login.tailscale.com' /tmp/ts.log 2>/dev/null && break
-              sleep 3
+              sleep 2
             done
             URL=$(grep -oE 'https://login\.tailscale\.com/[^[:space:]]+' /tmp/ts.log | head -1 || true)
-            echo "LOGIN_URL=$URL" >> $GITHUB_ENV
-            echo "::notice title=Tailscale login::افتح الرابط: $URL"
-            { echo "## تفعيل السيرفر"; echo; echo "$URL"; } >> $GITHUB_STEP_SUMMARY
-            publish "LOGIN_URL=$URL"
+            publish_set LOGIN_URL="$URL"
+            { echo "## تفعيل السيرفر"; echo; echo "$URL"; } >> "$GITHUB_STEP_SUMMARY"
           fi
-
-          IP=""
-          for i in $(seq 1 360); do
-            IP=$(tailscale ip -4 2>/dev/null || true); [ -n "$IP" ] && break
-            sleep 5
-          done
-          if [ -n "$IP" ]; then
-            echo "TS_IP=$IP" >> $GITHUB_ENV
-            publish "STATE=booting|IP=$IP|SLOT=${{ inputs.slot }}|RUN=$GITHUB_RUN_ID|INSTANCES=${{ inputs.instances }}|START=${RUN_START:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-            echo "Tailscale IP: $IP"
-          else
-            echo "::warning::not authorized yet - continuing, the watchdog keeps polling"
-            publish "LOGIN_URL=$URL"
-          fi
-
-      # ── 5. الفتح للـtailnet فقط، وإغلاق كل شيء آخر ───────────────────────
-      - name: Firewall (tailnet only)
-        run: |
-          for p in 22 3389 15555 15557 15559; do
-            sudo iptables -A INPUT -i tailscale0 -p tcp --dport $p -j ACCEPT
-          done
-          sudo iptables -A INPUT -p tcp --dport 3389 -j DROP
-          echo "firewall rules:"
-          sudo iptables -S INPUT | tail -12
-
-      # ── 6. SDK + AVD ─────────────────────────────────────────────────────
-      - name: Create AVDs
-        run: |
-          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          export ANDROID_AVD_HOME="$HOME/.android/avd"
-          mkdir -p "$ANDROID_AVD_HOME"
-          echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> $GITHUB_ENV
-          IMG="system-images;android-${{ inputs.api_level }};${{ inputs.image_type }};x86_64"
-
-          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
-          "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "emulator" "platform-tools" "$IMG" | tail -2
-
-          N=${{ inputs.instances }}
-          # توزيع موارد الجهاز (4 vCPU / 16 GB) بأقصى كفاءة ممكنة
-          if [ "$N" -eq 1 ]; then MEM=6144; CORES=4
-          elif [ "$N" -eq 2 ]; then MEM=4608; CORES=2
-          else MEM=3072; CORES=2; fi
-          echo "EMU_MEM=$MEM" >> $GITHUB_ENV
-          echo "EMU_CORES=$CORES" >> $GITHUB_ENV
-          echo "resources per instance: ${MEM}MB RAM / ${CORES} cores"
-          for i in $(seq 0 $((N-1))); do
-            NAME="emu$i"
-            echo no | "$SDK/cmdline-tools/latest/bin/avdmanager" create avd \
-                       -n "$NAME" -k "$IMG" -d pixel_5 --force \
-                       -p "$ANDROID_AVD_HOME/$NAME.avd" >/dev/null
-            INI="$ANDROID_AVD_HOME/$NAME.avd/config.ini"
-            [ -f "$INI" ] || { echo "AVD creation failed for $NAME"; exit 1; }
-            sed -i -E '/^(hw\.ramSize|hw\.cpu\.ncore|vm\.heapSize|disk\.dataPartition|hw\.gpu\.|hw\.lcd\.|hw\.keyboard)/d' "$INI"
-            printf '%s\n' \
-              "hw.ramSize=$MEM" 'vm.heapSize=512' "hw.cpu.ncore=$CORES" \
-              'hw.gpu.enabled=yes' 'hw.gpu.mode=swiftshader_indirect' \
-              'disk.dataPartition.size=6G' 'hw.keyboard=yes' \
-              'hw.lcd.width=720' 'hw.lcd.height=1280' 'hw.lcd.density=320' >> "$INI"
-          done
-          echo "AVDs created: $N"
-
-      # ── 7. تشغيل المحاكيات (بلا نافذة — تعرض عبر scrcpy) ──────────────────
-      - name: Launch emulators
-        run: |
-          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          N=${{ inputs.instances }}
-          for i in $(seq 0 $((N-1))); do
-            CONSOLE=$((5554 + i*2))
-            nohup "$SDK/emulator/emulator" -avd "emu$i" \
-              -no-window -no-audio -no-boot-anim -no-metrics \
-              -no-snapshot-save -no-snapshot-load -wipe-data \
-              -gpu swiftshader_indirect -accel on \
-              -memory ${EMU_MEM:-6144} -cores ${EMU_CORES:-4} \
-              -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full \
-              -port $CONSOLE -camera-back none -camera-front none \
-              > "/tmp/emu$i.log" 2>&1 &
-            echo "emu$i -> console $CONSOLE (${EMU_CORES:-4} cores, ${EMU_MEM:-6144}MB)"
-          done
-
-      - name: Wait for boot
-        run: |
-          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          ADB="$SDK/platform-tools/adb"
-          N=${{ inputs.instances }}
-          "$ADB" start-server
-          START=$(date +%s)
-          for i in $(seq 1 90); do
-            if [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
-              echo "booted in $(( $(date +%s) - START ))s"; break
-            fi
-            sleep 5
-          done
-
-          # الواي-فاي الوهمي (AndroidWifi) يسرق المسار الافتراضي بلا DNS سليم
-          # -> نعطّله ليبقى eth0 (خلية LTE) هو المسار الوحيد للإنترنت
-          for i in $(seq 0 $((N-1))); do
-            DEV="emulator-$((5554 + i*2))"
-            "$ADB" -s "$DEV" shell "svc wifi disable; settings put global wifi_on 0; settings put global airplane_mode_on 0" 2>/dev/null || true
+          TS_IP=""
+          for i in $(seq 1 120); do
+            TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+            [ -n "$TS_IP" ] && break
             sleep 2
-            "$ADB" -s "$DEV" shell "cmd connectivity airplane-mode disable" 2>/dev/null || true
           done
+          echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
+          echo "tailscale ip: ${TS_IP:-none}"
 
-          "$ADB" devices -l
+      # ── 6. SSH + كلمة سر لكل سيرفر (إصلاح تجاوز drop-in) ────────────────
+      - name: SSH and password
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          PW="${{ inputs.password }}"
+          if [ -z "$PW" ]; then PW="${{ secrets.RDP_PASSWORD }}"; fi
+          if [ -z "$PW" ]; then PW="Rd$(openssl rand -hex 8)"; fi
+          echo "runner:$PW" | sudo chpasswd
+          sudo mkdir -p /etc/ssh/sshd_config.d
+          printf '%s\n' 'PasswordAuthentication yes' 'KbdInteractiveAuthentication no' \
+            'UsePAM yes' 'PermitRootLogin no' \
+            | sudo tee /etc/ssh/sshd_config.d/01-android-server.conf >/dev/null
+          for f in /etc/ssh/sshd_config.d/50-cloud-init.conf \
+                   /etc/ssh/sshd_config.d/60-cloudimg-settings.conf; do
+            if [ -f "$f" ]; then
+              sudo sed -i -E 's/^#?PasswordAuthentication.*/PasswordAuthentication yes/' "$f" || true
+            fi
+          done
+          sudo systemctl enable ssh >/dev/null 2>&1 || true
+          sudo systemctl restart ssh 2>/dev/null || sudo systemctl restart sshd 2>/dev/null || true
+          sleep 1
+          echo "ssh=$(systemctl is-active ssh 2>/dev/null || systemctl is-active sshd 2>/dev/null || echo unknown)"
+          ss -ltn | grep ':22 ' || true
+          source .github/scripts/publish.sh
+          publish_set SSH=1 UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "password set (${#PW} chars)"
 
-          # تحقق فعلي من الإنترنت داخل الأندرويد (TCP وليس ping: Azure يحجب ICMP)
+      # ── 7. سطح مكتب لينكس + RDP (اختياري) ───────────────────────────────
+      - name: Desktop stack (optional)
+        if: inputs.desktop == 'true'
+        run: |
+          set -uo pipefail
+          sudo apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq \
+            xfce4 xfce4-terminal dbus-x11 xrdp ssl-cert scrcpy >/dev/null
+          sudo adduser xrdp ssl-cert >/dev/null 2>&1 || true
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          mkdir -p ~/bin
+          printf '%s\n' '#!/bin/sh' \
+            "export PATH=\"\$PATH:$SDK/platform-tools\"" \
+            'LOG="$HOME/scrcpy-desktop.log"' \
+            'while true; do' \
+            '  for i in $(seq 1 60); do adb devices | grep -q "emulator-5554" && break; sleep 2; done' \
+            '  scrcpy -s emulator-5554 --max-size=720 --max-fps=30 --no-audio --video-bit-rate=2M --window-title=Android >> "$LOG" 2>&1' \
+            '  sleep 5' \
+            'done' > ~/bin/mirror.sh
+          chmod +x ~/bin/mirror.sh
+          printf '%s\n' '#!/bin/sh' \
+            'export XDG_SESSION_TYPE=x11' \
+            'export XDG_CURRENT_DESKTOP=XFCE' \
+            'xset s off; xset -dpms; xset s noblank' \
+            '[ -x "$HOME/bin/mirror.sh" ] && ( sleep 6; exec "$HOME/bin/mirror.sh" ) &' \
+            'exec dbus-launch --sh-syntax --exit-with-session startxfce4' > ~/.xsession
+          chmod +x ~/.xsession
+          mkdir -p ~/.config/xfce4/xfconf/xfce-perchannel-xml
+          printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<channel name="xfwm4" version="1.0">' \
+            '  <property name="general" type="empty">' \
+            '    <property name="use_compositing" type="bool" value="false"/>' \
+            '  </property>' \
+            '</channel>' > ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
+          INI=/etc/xrdp/xrdp.ini
+          for kv in max_bpp=16 crypt_level=low use_compression=yes tcp_nodelay=yes bitmap_cache=yes; do
+            k=${kv%%=*}; v=${kv#*=}
+            if grep -qE "^#?${k}=" "$INI"; then
+              sudo sed -i -E "s|^#?${k}=.*|${k}=${v}|" "$INI"
+            else
+              sudo sed -i "/^\[Globals\]/a ${k}=${v}" "$INI"
+            fi
+          done
+          sudo systemctl enable xrdp >/dev/null 2>&1 || true
+          sudo systemctl restart xrdp
+          echo "xrdp=$(systemctl is-active xrdp)"
+
+      # ── 8. انتظار الإقلاع + تخطي المعالج + فحص إنترنت TCP ────────────────
+      - name: Wait for Android boot
+        run: |
+          set -uo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          ADB="$SDK/platform-tools/adb"
+          "$ADB" start-server >/dev/null 2>&1 || true
+          T0=$(date +%s)
+          for i in $(seq 1 150); do
+            B=$("$ADB" -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$B" = "1" ] && break
+            sleep 2
+          done
+          echo "boot_completed in $(( $(date +%s) - T0 ))s"
           for i in $(seq 0 $((N-1))); do
-            DEV="emulator-$((5554 + i*2))"
-            for t in $(seq 1 10); do
-              if "$ADB" -s "$DEV" shell "printf 'GET / HTTP/1.0\r\nHost: one.one.one.one\r\n\r\n' | nc -w 6 1.1.1.1 80" 2>/dev/null | grep -q 'HTTP/'; then
-                echo "$DEV: internet OK"; break
-              fi
-              echo "$DEV: waiting for internet ($t/10)"; sleep 5
+            DEV="emulator-$(( 5554 + i * 2 ))"
+            "$ADB" -s "$DEV" shell "settings put global device_provisioned 1" >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell "settings put secure user_setup_complete 1" >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell "pm disable-user --user 0 com.google.android.setupwizard" >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell "am force-stop com.google.android.setupwizard" >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell "svc wifi disable; settings put global wifi_on 0; svc bluetooth disable" >/dev/null 2>&1 || true
+            for k in window_animation_scale transition_animation_scale animator_duration_scale; do
+              "$ADB" -s "$DEV" shell settings put global "$k" 0 >/dev/null 2>&1 || true
             done
           done
-          tail -5 /tmp/emu0.log || true
+          for i in $(seq 0 $((N-1))); do
+            DEV="emulator-$(( 5554 + i * 2 ))"
+            OK=0
+            for t in $(seq 1 12); do
+              if "$ADB" -s "$DEV" shell "printf 'GET / HTTP/1.0\r\nHost: one.one.one.one\r\n\r\n' | nc -w 5 1.1.1.1 80" 2>/dev/null | grep -q 'HTTP/'; then
+                echo "$DEV: internet OK"; OK=1; break
+              fi
+              sleep 4
+            done
+            if [ "$OK" = "0" ]; then echo "::warning::$DEV internet not verified"; fi
+          done
+          "$ADB" devices -l
 
-      # ── 8.b تنظيف أندرويد: إزالة التطبيقات/الخدمات الثقيلة غير الضرورية ──
-      - name: Debloat Android
+      # ── 9. وضع التشغيل ───────────────────────────────────────────────────
+      - name: Mode setup
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          set -uo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
           ADB="$SDK/platform-tools/adb"
-          N=${{ inputs.instances }}
+          source .github/scripts/publish.sh
+          if [ "$MODE" = "play" ]; then
+            for i in $(seq 0 $((N-1))); do
+              DEV="emulator-$(( 5554 + i * 2 ))"
+              for p in com.android.vending com.google.android.gms com.google.android.gsf com.android.chrome; do
+                "$ADB" -s "$DEV" shell pm enable "$p" >/dev/null 2>&1 || true
+              done
+              "$ADB" -s "$DEV" shell "monkey -p com.android.vending -c android.intent.category.LAUNCHER 1" >/dev/null 2>&1 || true
+              echo "$DEV: play store launched"
+            done
+            publish_set PLAY=1
+          else
+            for i in $(seq 0 $((N-1))); do
+              DEV="emulator-$(( 5554 + i * 2 ))"
+              "$ADB" -s "$DEV" root >/dev/null 2>&1 || true
+              sleep 3
+              for t in $(seq 1 20); do
+                "$ADB" -s "$DEV" shell id 2>/dev/null | grep -q 'uid=0' && break
+                sleep 1
+              done
+              echo "$DEV: $("$ADB" -s "$DEV" shell id | tr -d '\r')"
+              "$ADB" -s "$DEV" shell "cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.threebutton" >/dev/null 2>&1 || true
+              "$ADB" -s "$DEV" shell "settings put secure navigation_mode 0" >/dev/null 2>&1 || true
+            done
+            publish_set PLAY=0
+          fi
 
-          # تطبيقات/خدمات تُستهلك CPU وخلفية وبيانات بلا فائدة للاستخدام اليدوي
-          # (نبقي gms/gsf حتى لا تظهر نوافذ "توقف التطبيق")
+      # ── 10. إزالة الكماليات: نُبقي Play + Chrome + الإعدادات فقط ─────────
+      - name: Debloat Android
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          ADB="$SDK/platform-tools/adb"
           PKGS="com.google.android.youtube
           com.google.android.apps.youtube.music
           com.google.android.apps.maps
@@ -283,269 +428,160 @@ jobs:
           com.google.android.apps.messaging
           com.google.android.calendar
           com.google.android.contacts
-          com.google.android.deskclock
+          com.google.android.dialer
           com.google.android.apps.wellbeing
           com.google.android.apps.turbo
           com.google.android.partnersetup
-          com.google.android.setupwizard
           com.google.android.apps.restore
           com.google.android.feedback
           com.google.android.printservice.recommendation
           com.google.android.apps.safetyhub
           com.google.android.apps.subscriptions.red
-          com.android.vending"
-
+          com.google.android.play.games
+          com.google.android.apps.drive
+          com.google.android.apps.wallpaper
+          com.google.android.apps.tachyon
+          com.google.android.markup
+          com.google.android.apps.nbu.files
+          com.google.android.apps.healthdata
+          com.google.android.apps.nexuslauncher.overlay
+          com.android.chrome.beta"
+          ENABLED=0
           for i in $(seq 0 $((N-1))); do
-            DEV="emulator-$((5554 + i*2))"
+            DEV="emulator-$(( 5554 + i * 2 ))"
             for p in $PKGS; do
               "$ADB" -s "$DEV" shell pm disable-user --user 0 "$p" >/dev/null 2>&1 || true
             done
-            # إيقاف الحركات = استجابة أسرع وCPU أقل
-            for k in window_animation_scale transition_animation_scale animator_duration_scale; do
-              "$ADB" -s "$DEV" shell settings put global "$k" 0 >/dev/null 2>&1 || true
-            done
-            "$ADB" -s "$DEV" shell settings put global wifi_scan_always_enabled 0 >/dev/null 2>&1 || true
-            "$ADB" -s "$DEV" shell settings put global auto_time 0 >/dev/null 2>&1 || true
-            "$ADB" -s "$DEV" shell pm trim-caches 2G >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell "settings put global wifi_scan_always_enabled 0" >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell "pm trim-caches 4G" >/dev/null 2>&1 || true
             "$ADB" -s "$DEV" shell "am kill-all" >/dev/null 2>&1 || true
-            echo "$DEV: debloated ($(echo $PKGS | wc -w) packages)"
+            ENABLED=$("$ADB" -s "$DEV" shell pm list packages -e 2>/dev/null | wc -l | tr -d '\r')
+            echo "$DEV: enabled packages = $ENABLED"
           done
+          for p in com.android.vending com.android.chrome com.android.settings com.google.android.gms; do
+            ST=$("$ADB" -s emulator-5554 shell pm list packages -e 2>/dev/null | grep -c "^package:$p$" | tr -d '\r')
+            echo "  $p enabled=$ST"
+          done
+          source .github/scripts/publish.sh
+          publish_set APPS="$ENABLED" UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-      # ── 8.c روت + أزرار التحكم + كروم + أدوات التحكم الكامل ──────────────
-      - name: Android root & controls
+      # ── 11. أدوات التحكم + كشف adb ───────────────────────────────────────
+      - name: Controls and adb expose
         run: |
-          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          ADB="$SDK/platform-tools/adb"
-          N=${{ inputs.instances }}
+          set -uo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          mkdir -p /opt/android-server ~/bin
+          QEMU_REL="qemu/linux-x86_64/qemu-system-x86_64"
+          cp .github/scripts/patch-imei.py /opt/android-server/patch-imei.py
+          cp .github/scripts/ctl.sh ~/bin/ctl.sh
+          chmod +x ~/bin/ctl.sh
+          echo "$IMEI_VAL" > /opt/android-server/imei-0
 
           for i in $(seq 0 $((N-1))); do
-            DEV="emulator-$((5554 + i*2))"
-
-            # روت كامل — صور google_apis تقبل adb root
-            "$ADB" -s "$DEV" root >/dev/null 2>&1 || true
-            sleep 4
-            for t in $(seq 1 20); do
-              "$ADB" -s "$DEV" shell id 2>/dev/null | grep -q 'uid=0' && break
-              sleep 2
-            done
-            echo "$DEV: $("$ADB" -s "$DEV" shell id | tr -d '\r')"
-
-            # أزرار التحكم المرئية: رجوع / رئيسية / التطبيقات الأخيرة
-            "$ADB" -s "$DEV" shell "cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.threebutton" >/dev/null 2>&1 || true
-            "$ADB" -s "$DEV" shell settings put secure navigation_mode 0 >/dev/null 2>&1 || true
-
-            # Chrome داخل الأندرويد (مثبّت في الصورة) — تفعيل وتشغيل
-            "$ADB" -s "$DEV" shell pm enable com.android.chrome >/dev/null 2>&1 || true
-            "$ADB" -s "$DEV" shell am start -n com.android.chrome/com.google.android.apps.chrome.Main >/dev/null 2>&1 || true
-          done
-
-          # أدوات تحكم كاملة داخل السيرفر
-          mkdir -p ~/bin
-          printf '%s\n' \
-            '#!/bin/bash' \
-            "ADB=$SDK/platform-tools/adb" \
-            'DEV=${DEV:-emulator-5554}' \
-            'case "$1" in' \
-            '  root)   $ADB -s $DEV root; sleep 3; $ADB -s $DEV shell id;;' \
-            '  nav)    $ADB -s $DEV shell "cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.threebutton"; $ADB -s $DEV shell settings put secure navigation_mode 0;;' \
-            '  geo)    $ADB -s $DEV emu geo fix "$3" "$2"; echo "GPS => lat=$2 lon=$3";;' \
-            '  proxy)  if [ "$2" = off ]; then $ADB -s $DEV shell settings put global http_proxy :0; echo proxy=off; else $ADB -s $DEV shell settings put global http_proxy "$2"; echo "proxy=$2"; fi;;' \
-            '  ip)     $ADB -s $DEV shell ip -4 addr show | grep inet;;' \
-            '  mac)    $ADB -s $DEV root >/dev/null 2>&1; sleep 2; $ADB -s $DEV shell ip link set eth0 address "$2"; $ADB -s $DEV shell ip link show eth0 | head -1;;' \
-            '  chrome) $ADB -s $DEV shell am start -n com.android.chrome/com.google.android.apps.chrome.Main;;' \
-            '  install) $ADB -s $DEV install -r "$2";;' \
-            '  shot)   $ADB -s $DEV exec-out screencap -p > "${2:-$HOME/screen.png}"; echo "$2 saved";;' \
-            '  reboot) $ADB -s $DEV reboot;;' \
-            '  *)      echo "استخدام: android-ctl.sh {root|nav|geo LAT LON|proxy HOST:PORT|proxy off|ip|mac XX:XX:XX:XX:XX:XX|chrome|install APK|shot FILE|reboot}";;' \
-            'esac' > ~/bin/android-ctl.sh
-          chmod +x ~/bin/android-ctl.sh
-          echo "ready: ~/bin/android-ctl.sh"
-
-      # ── 8. ADB عبر tailnet (لـscrcpy من جهازك) ───────────────────────────
-      - name: Expose adb
-        run: |
-          N=${{ inputs.instances }}
-          for i in $(seq 0 $((N-1))); do
-            EXT=$((15555 + i*2)); INT=$((5555 + i*2))
-            nohup socat TCP-LISTEN:$EXT,fork,reuseaddr TCP:127.0.0.1:$INT > "/tmp/socat$i.log" 2>&1 &
-          done
-          sleep 2; ss -ltn | grep -E ':(1555[0-9])' || true
-
-      # ── 9. RDP: مستخدم + جلسة xfce بلا قفل شاشة ─────────────────────────
-      - name: Configure RDP session
-        env:
-          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
-        run: |
-          PW="$RDP_PASS"
-          if [ -z "$PW" ]; then PW="Rd$(openssl rand -hex 8)"; fi
-          echo "runner:$PW" | sudo chpasswd
-          echo "RDP_PASS_PLAIN=$PW" >> $GITHUB_ENV
-
-          printf '%s\n' \
-            '#!/bin/sh' \
-            'export XDG_SESSION_TYPE=x11' \
-            'export XDG_CURRENT_DESKTOP=XFCE' \
-            'xset s off; xset -dpms; xset s noblank' \
-            '( sleep 4; xrandr -s 1280x720 2>/dev/null || xrandr --fb 1280x720 2>/dev/null || true ) &' \
-            '[ -x "$HOME/bin/android-mirror.sh" ] && ( sleep 6; exec "$HOME/bin/android-mirror.sh" ) &' \
-            'exec dbus-launch --sh-syntax --exit-with-session startxfce4' > ~/.xsession
-          chmod +x ~/.xsession
-
-          # إيقاف compositing (يوفّر CPU كبير في xfwm4 على السيرفر)
-          mkdir -p ~/.config/xfce4/xfconf/xfce-perchannel-xml
-          printf '%s\n' \
-            '<?xml version="1.0" encoding="UTF-8"?>' \
-            '<channel name="xfwm4" version="1.0">' \
-            '  <property name="general" type="empty">' \
-            '    <property name="use_compositing" type="bool" value="false"/>' \
-            '  </property>' \
-            '</channel>' > ~/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
-
-          # adb + scrcpy في PATH لكل الجلسات
-          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          echo "export PATH=\$PATH:$SDK/platform-tools" | sudo tee /etc/profile.d/android.sh >/dev/null
-
-          # نافذة Android تلقائيًا داخل السطح المكتب (سكربت منفصل: يمنع مشاكل اقتباس Exec)
-          mkdir -p ~/bin
-          printf '%s\n' \
-            '#!/bin/sh' \
-            "export PATH=\"\$PATH:$SDK/platform-tools\"" \
-            'LOG="$HOME/scrcpy-desktop.log"' \
-            'echo "=== $(date) start ===" >> "$LOG"' \
-            'adb start-server >> "$LOG" 2>&1' \
-            'VER=$(scrcpy --version 2>/dev/null | head -1 | sed -n "s/.*scrcpy \([0-9]*\)\..*/\1/p")' \
-            'if [ "${VER:-1}" -ge 2 ]; then EXTRA="--no-audio --video-bit-rate=2M"; else EXTRA="--bit-rate=2M"; fi' \
-            'echo "scrcpy major=$VER extra=$EXTRA" >> "$LOG"' \
-            'while true; do' \
-            '  for i in $(seq 1 60); do' \
-            '    adb devices | grep -q emulator-5554 && break' \
-            '    sleep 2' \
-            '  done' \
-            '  scrcpy -s emulator-5554 --max-size=720 --max-fps=30 $EXTRA --window-title=Android >> "$LOG" 2>&1' \
-            '  echo "=== $(date) scrcpy exited - retry in 5s ===" >> "$LOG"' \
-            '  sleep 5' \
-            'done' > ~/bin/android-mirror.sh
-          chmod +x ~/bin/android-mirror.sh
-
-          # أيقونة Chrome على سطح المكتب (واضحة وسهلة)
-          DESK="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")"
-          mkdir -p "$DESK"
-          printf '%s\n' \
-            '[Desktop Entry]' 'Type=Application' 'Name=Google Chrome' \
-            'Exec=google-chrome --disable-dev-shm-usage' 'Icon=google-chrome' \
-            'Terminal=false' 'Categories=Network;WebBrowser;' > "$DESK/Google Chrome.desktop"
-          chmod +x "$DESK/Google Chrome.desktop"
-
-          # SSH عبر الـtailnet (تشخيص مباشر)
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq openssh-server >/dev/null 2>&1 || true
-          sudo sed -i -E 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i -E 's/^#?KbdInteractiveAuthentication .*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
-          grep -q '^PasswordAuthentication yes' /etc/ssh/sshd_config || echo 'PasswordAuthentication yes' | sudo tee -a /etc/ssh/sshd_config >/dev/null
-          sudo systemctl enable ssh >/dev/null 2>&1 || true
-          sudo systemctl restart ssh 2>/dev/null || sudo systemctl restart sshd 2>/dev/null || true
-          sudo systemctl is-active ssh 2>/dev/null || sudo systemctl is-active sshd 2>/dev/null || true
-
-          # لا سبات ولا قفل شاشة
-          xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-enabled -n -t bool -s false 2>/dev/null || true
-
-          # xrdp: 16-bit + ضغط + بلا تأخير (يخفّض الحمل على CPU والشبكة)
-          INI=/etc/xrdp/xrdp.ini
-          sudo sed -i -E 's/^#?port=3389/port=3389/' $INI
-          for kv in max_bpp=16 crypt_level=low use_compression=yes tcp_nodelay=yes bitmap_cache=yes; do
-            k=${kv%%=*}; v=${kv#*=}
-            if grep -qE "^#?${k}=" $INI; then
-              sudo sed -i -E "s|^#?${k}=.*|${k}=${v}|" $INI
+            . /opt/android-server/inst-$i.env
+            if [ "$i" = "0" ] && [ -f "$SDK/emulator/$QEMU_REL.bak" ]; then
+              cp "$SDK/emulator/$QEMU_REL.bak" "/opt/android-server/qemu-pristine-$i"
             else
-              sudo sed -i "/^\[Globals\]/a ${k}=${v}" $INI
+              cp "$SDK/emulator/$QEMU_REL" "/opt/android-server/qemu-pristine-$i"
+            fi
+            printf '%s\n' '#!/usr/bin/env bash' \
+              "export ANDROID_SDK_ROOT=\"$SDK\"" \
+              "export ANDROID_AVD_HOME=\"$HOME/.android/avd\"" \
+              "export LD_LIBRARY_PATH=\"$(dirname "$LAUNCHER")/lib64:$(dirname "$QEMU"):\${LD_LIBRARY_PATH:-}\"" \
+              "exec \"$LAUNCHER\" -avd emu$i -no-window -no-audio -no-boot-anim -no-metrics -no-snapshot \\" \
+              "  -gpu swiftshader_indirect -accel on -memory $MEM -cores $CORES \\" \
+              "  -dns-server 1.1.1.1,8.8.8.8 -netdelay none -netspeed full \\" \
+              "  -port $(( 5554 + i * 2 )) -camera-back none -camera-front none" \
+              > /opt/android-server/start-$i.sh
+            chmod +x /opt/android-server/start-$i.sh
+            EXT=$(( 15555 + i * 2 ))
+            INT=$(( 5555 + i * 2 ))
+            if ! ss -ltn 2>/dev/null | grep -q ":$EXT "; then
+              nohup socat TCP-LISTEN:$EXT,fork,reuseaddr TCP:127.0.0.1:$INT > "/tmp/socat$i.log" 2>&1 &
             fi
           done
-          grep -E '^(max_bpp|crypt_level|use_compression|tcp_nodelay|bitmap_cache)=' $INI || true
+          echo "ctl.sh ready"; ss -ltn | grep -E ':(1555[0-9])' || true
 
-          sudo systemctl enable xrdp >/dev/null 2>&1
+      # ── 12. جلسة RDP (اختياري) ───────────────────────────────────────────
+      - name: RDP session (optional)
+        if: inputs.desktop == 'true'
+        run: |
           sudo systemctl restart xrdp
-          sudo systemctl is-active xrdp
+          sleep 1
+          echo "xrdp=$(systemctl is-active xrdp)"
+          ss -ltn | grep ':3389 ' || true
 
-      # ── 10. الملخص ───────────────────────────────────────────────────────
+      # ── 13. الملخص + الجاهزية ────────────────────────────────────────────
       - name: Summary
         env:
           GH_TOKEN: ${{ github.token }}
-          STATUS_FILE: status-${{ inputs.slot }}.txt
         run: |
-          sed -i '1s/^\xEF\xBB\xBF//' .github/scripts/publish.sh 2>/dev/null || true
+          set -uo pipefail
           source .github/scripts/publish.sh
-          N=${{ inputs.instances }}
+          PORTS=$(seq 15555 2 $(( 15555 + (N-1)*2 )) | paste -sd, -)
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           {
-            echo "## الوصول"
+            echo "## السيرفر جاهز"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| RDP | \`$TS_IP:3389\` |"
-            echo "| User | \`runner\` |"
-            echo "| Password | من الـSecret \`RDP_PASSWORD\` |"
-            echo "| ADB (من جهازك) | \`adb connect $TS_IP:15555\` ثم \`scrcpy\` |"
-            echo "| SSH | \`ssh runner@$TS_IP\` (نفس كلمة السر) |"
-            echo "| أزرار التحكم | رجوع · رئيسية · التطبيقات الأخيرة (مفعّلة) |"
-            echo "| الروت | \`adb root\` أو \`~/bin/android-ctl.sh root\` |"
-            echo "| Instances | $N (منافذ 15555 / 15557 / 15559) |"
-            if [ -n "$LOGIN_URL" ]; then echo "| Tailscale | [$LOGIN_URL]($LOGIN_URL) |"; fi
-            echo ""
-            echo "داخل السطح المكتب: Chrome + نافذة Android (scrcpy) تلقائيًا."
-            echo ""
-            echo "> إعدادات الأداء: AVD 720×1280 · سطح مكتب 1280×720 · xrdp 16-bit · compositing معطّل."
-            echo "> تُحذف الآلة عند سقف 6 ساعات."
-          } | tee -a $GITHUB_STEP_SUMMARY
-          publish "STATE=ready|IP=$TS_IP|SLOT=${{ inputs.slot }}|RUN=$GITHUB_RUN_ID|INSTANCES=$N|START=${RUN_START:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}|MAC=52:54:00:12:34:56|PORTS=15555,15557,15559|ANDROID=${{ inputs.api_level }}|CORES=${EMU_CORES:-4}|MEM=${EMU_MEM:-6144}"
+            echo "| الوضع | \`$MODE\` (root=$ROOT) |"
+            echo "| IP | \`${TS_IP:-غير مفعّل}\` |"
+            echo "| RDP | $([ "$DESK" = "true" ] && echo "\`${TS_IP:-IP}:3389\` user: runner" || echo "معطّل") |"
+            echo "| SSH | \`ssh runner@${TS_IP:-IP}\` |"
+            echo "| ADB | \`adb connect ${TS_IP:-IP}:15555\` |"
+            echo "| Android | $API · ${N} محاكي · ${CORES} نواة · ${MEM}MB |"
+            echo "| IMEI | \`$IMEI_VAL\` |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          publish_set STATE=ready IP="${TS_IP:-}" SLOT=${{ inputs.slot }} RUN=${GITHUB_RUN_ID} \
+            START="$START" INSTANCES="$N" MODE="$MODE" ROOT="$ROOT" DESKTOP="$DESK" \
+            ANDROID="$API" IMAGE="$IMG_TAG" PORTS="$PORTS" CORES="$CORES" MEM="$MEM" \
+            IMEI="$IMEI_VAL" HOST="$HOST_NAME" READY_AT="$NOW" UPDATED="$NOW"
 
-      # ── 11. Watchdog: يحيي المحاكي و xrdp إن سقطا ────────────────────────
-      - name: Keep alive
+      # ── 14. Watchdog ─────────────────────────────────────────────────────
+      - name: Watchdog
         env:
           GH_TOKEN: ${{ github.token }}
-          STATUS_FILE: status-${{ inputs.slot }}.txt
         run: |
-          sed -i '1s/^\xEF\xBB\xBF//' .github/scripts/publish.sh 2>/dev/null || true
+          set -uo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          ADB="$SDK/platform-tools/adb"
           source .github/scripts/publish.sh
-          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          N=${{ inputs.instances }}
-
-          # لو لم يُفعَّل Tailscale بعد: ننتظر الضغطة وننشر الـIP فور توفره
-          if [ -z "$TS_IP" ]; then
-            for i in $(seq 1 720); do
-              IP=$(tailscale ip -4 2>/dev/null || true)
-              if [ -n "$IP" ]; then
-                echo "TS_IP=$IP" >> $GITHUB_ENV
-                publish "IP=$IP"
-                echo "tailscale authorised: $IP"
-                break
-              fi
-              sleep 5
-            done
-          fi
-          END=$(( $(date +%s) + 345*60 ))
+          END=$(( $(date +%s) + 330*60 ))
+          LAST_HB=0
           while [ "$(date +%s)" -lt "$END" ]; do
             for i in $(seq 0 $((N-1))); do
-              if ! pgrep -f "\-avd emu$i" >/dev/null; then
+              PORT=$(( 5554 + i * 2 )); EXT=$(( 15555 + i * 2 ))
+              if ! pgrep -f "avd emu$i" >/dev/null 2>&1; then
                 echo "[$(date +%H:%M:%S)] emu$i dead -> restart"
-                nohup "$SDK/emulator/emulator" -avd "emu$i" -no-window -no-audio \
-                  -no-boot-anim -no-metrics -no-snapshot-save -no-snapshot-load \
-                  -gpu swiftshader_indirect -accel on \
-                  -dns-server 8.8.8.8,1.1.1.1 -netdelay none -netspeed full \
-                  -memory ${EMU_MEM:-6144} -cores ${EMU_CORES:-4} \
-                  -port $((5554 + i*2)) >> "/tmp/emu$i.log" 2>&1 &
-                DEV="emulator-$((5554 + i*2))"
-                for t in $(seq 1 60); do
-                  [ "$("$SDK/platform-tools/adb" -s "$DEV" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
-                  sleep 5
-                done
-                "$SDK/platform-tools/adb" -s "$DEV" shell "svc wifi disable; settings put global wifi_on 0" >/dev/null 2>&1 || true
-                "$SDK/platform-tools/adb" -s "$DEV" root >/dev/null 2>&1 || true
-                sleep 3
-                "$SDK/platform-tools/adb" -s "$DEV" shell "cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.threebutton; settings put secure navigation_mode 0" >/dev/null 2>&1 || true
+                publish_set STATE=booting UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                nohup /opt/android-server/start-$i.sh > "/tmp/emu$i.log" 2>&1 &
+                sleep 45
+                "$ADB" -s "emulator-$PORT" shell "settings put global device_provisioned 1; svc wifi disable" >/dev/null 2>&1 || true
+                publish_set STATE=ready UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
               fi
-              EXT=$((15555 + i*2)); INT=$((5555 + i*2))
-              ss -ltn 2>/dev/null | grep -q ":$EXT " || \
-                nohup socat TCP-LISTEN:$EXT,fork,reuseaddr TCP:127.0.0.1:$INT >> "/tmp/socat$i.log" 2>&1 &
+              if ! ss -ltn 2>/dev/null | grep -q ":$EXT "; then
+                nohup socat TCP-LISTEN:$EXT,fork,reuseaddr TCP:127.0.0.1:$(( 5555 + i * 2 )) >> "/tmp/socat$i.log" 2>&1 &
+              fi
             done
-            sudo systemctl is-active --quiet xrdp || sudo systemctl restart xrdp
-            echo "[$(date +%H:%M:%S)] qemu=$(pgrep -fc qemu-system-x86_64 || echo 0) xrdp=$(systemctl is-active xrdp) mem=$(free -m | awk '/Mem:/{print $3\"MB used\"}')"
+            systemctl is-active --quiet ssh || sudo systemctl restart ssh 2>/dev/null || true
+            if [ "$DESK" = "true" ]; then
+              systemctl is-active --quiet xrdp || sudo systemctl restart xrdp 2>/dev/null || true
+            fi
+            NOW=$(date +%s)
+            if [ $(( NOW - LAST_HB )) -ge 3600 ]; then
+              publish_set UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              LAST_HB=$NOW
+            fi
+            echo "[$(date +%H:%M:%S)] qemu=$(pgrep -fc qemu-system-x86_64 2>/dev/null || echo 0) mem=$(free -m | awk '/Mem:/{print $3"MB"}')"
             sleep 120
           done
+
+      # ── 15. تنظيف (يزيل الجهاز من Tailscale) ─────────────────────────────
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo tailscale logout 2>/dev/null || true
+          /usr/local/lib/android/sdk/platform-tools/adb emu kill 2>/dev/null || true
+          pkill -f qemu-system-x86_64 2>/dev/null || true
+          echo cleaned
