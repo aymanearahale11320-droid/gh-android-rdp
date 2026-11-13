@@ -315,6 +315,7 @@ jobs:
           done
 
           # أدوات تحكم كاملة داخل السيرفر
+          mkdir -p ~/bin
           printf '%s\n' \
             '#!/bin/bash' \
             "ADB=$SDK/platform-tools/adb" \
