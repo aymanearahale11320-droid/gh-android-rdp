@@ -286,6 +286,54 @@ jobs:
             echo "$DEV: debloated ($(echo $PKGS | wc -w) packages)"
           done
 
+      # ── 8.c روت + أزرار التحكم + كروم + أدوات التحكم الكامل ──────────────
+      - name: Android root & controls
+        run: |
+          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          ADB="$SDK/platform-tools/adb"
+          N=${{ inputs.instances }}
+
+          for i in $(seq 0 $((N-1))); do
+            DEV="emulator-$((5554 + i*2))"
+
+            # روت كامل — صور google_apis تقبل adb root
+            "$ADB" -s "$DEV" root >/dev/null 2>&1 || true
+            sleep 4
+            for t in $(seq 1 20); do
+              "$ADB" -s "$DEV" shell id 2>/dev/null | grep -q 'uid=0' && break
+              sleep 2
+            done
+            echo "$DEV: $("$ADB" -s "$DEV" shell id | tr -d '\r')"
+
+            # أزرار التحكم المرئية: رجوع / رئيسية / التطبيقات الأخيرة
+            "$ADB" -s "$DEV" shell "cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.threebutton" >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell settings put secure navigation_mode 0 >/dev/null 2>&1 || true
+
+            # Chrome داخل الأندرويد (مثبّت في الصورة) — تفعيل وتشغيل
+            "$ADB" -s "$DEV" shell pm enable com.android.chrome >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell am start -n com.android.chrome/com.google.android.apps.chrome.Main >/dev/null 2>&1 || true
+          done
+
+          # أدوات تحكم كاملة داخل السيرفر
+          printf '%s\n' \
+            '#!/bin/bash' \
+            "ADB=$SDK/platform-tools/adb" \
+            'DEV=${DEV:-emulator-5554}' \
+            'case "$1" in' \
+            '  root)   $ADB -s $DEV root; sleep 3; $ADB -s $DEV shell id;;' \
+            '  nav)    $ADB -s $DEV shell "cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.threebutton"; $ADB -s $DEV shell settings put secure navigation_mode 0;;' \
+            '  geo)    $ADB -s $DEV emu geo fix "$3" "$2"; echo "GPS => lat=$2 lon=$3";;' \
+            '  proxy)  if [ "$2" = off ]; then $ADB -s $DEV shell settings put global http_proxy :0; echo proxy=off; else $ADB -s $DEV shell settings put global http_proxy "$2"; echo "proxy=$2"; fi;;' \
+            '  ip)     $ADB -s $DEV shell ip -4 addr show | grep inet;;' \
+            '  chrome) $ADB -s $DEV shell am start -n com.android.chrome/com.google.android.apps.chrome.Main;;' \
+            '  install) $ADB -s $DEV install -r "$2";;' \
+            '  shot)   $ADB -s $DEV exec-out screencap -p > "${2:-$HOME/screen.png}"; echo "$2 saved";;' \
+            '  reboot) $ADB -s $DEV reboot;;' \
+            '  *)      echo "استخدام: android-ctl.sh {root|nav|geo LAT LON|proxy HOST:PORT|proxy off|ip|chrome|install APK|shot FILE|reboot}";;' \
+            'esac' > ~/bin/android-ctl.sh
+          chmod +x ~/bin/android-ctl.sh
+          echo "ready: ~/bin/android-ctl.sh"
+
       # ── 8. ADB عبر tailnet (لـscrcpy من جهازك) ───────────────────────────
       - name: Expose adb
         run: |
@@ -352,6 +400,15 @@ jobs:
             'done' > ~/bin/android-mirror.sh
           chmod +x ~/bin/android-mirror.sh
 
+          # أيقونة Chrome على سطح المكتب (واضحة وسهلة)
+          DESK="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")"
+          mkdir -p "$DESK"
+          printf '%s\n' \
+            '[Desktop Entry]' 'Type=Application' 'Name=Google Chrome' \
+            'Exec=google-chrome --disable-dev-shm-usage' 'Icon=google-chrome' \
+            'Terminal=false' 'Categories=Network;WebBrowser;' > "$DESK/Google Chrome.desktop"
+          chmod +x "$DESK/Google Chrome.desktop"
+
           # SSH عبر الـtailnet (تشخيص مباشر)
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y -qq openssh-server >/dev/null 2>&1 || true
           sudo sed -i -E 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
@@ -395,6 +452,8 @@ jobs:
             echo "| Password | \`$RDP_PASS_PLAIN\` |"
             echo "| ADB (من جهازك) | \`adb connect $TS_IP:15555\` ثم \`scrcpy\` |"
             echo "| SSH | \`ssh runner@$TS_IP\` (نفس كلمة السر) |"
+            echo "| أزرار التحكم | رجوع · رئيسية · التطبيقات الأخيرة (مفعّلة) |"
+            echo "| الروت | \`adb root\` أو \`~/bin/android-ctl.sh root\` |"
             echo "| Instances | $N (منافذ 15555 / 15557 / 15559) |"
             if [ -n "$LOGIN_URL" ]; then echo "| Tailscale | [$LOGIN_URL]($LOGIN_URL) |"; fi
             echo ""
