@@ -57,7 +57,39 @@ jobs:
           sudo apt-get clean
           df -h / | tail -1
 
-      # ── 3. سطح المكتب + Chrome + أدوات ───────────────────────────────────
+      # ── 3. تنظيف خدمات النظام + ضبط الأداء ───────────────────────────────
+      - name: Debloat & tune host
+        run: |
+          # خدمات لا نحتاجها إطلاقًا في هذه الجلسة (تستهلك CPU/ذاكرة/قرص)
+          for s in snapd.service snapd.socket snapd.seeded.service \
+                   docker.service docker.socket containerd.service \
+                   unattended-upgrades.service apt-daily.service apt-daily-upgrade.service \
+                   apt-daily.timer apt-daily-upgrade.timer motd-news.service motd-news.timer \
+                   man-db.timer e2scrub_all.timer fwupd.service fwupd-refresh.service \
+                   ModemManager.service multipathd.service iscsid.service lvm2-monitor.service \
+                   ua-reboot-cmds.service ua-timer.timer apport.service; do
+            sudo systemctl disable --now "$s" >/dev/null 2>&1 || true
+          done
+          sudo systemctl mask snapd.service snapd.socket >/dev/null 2>&1 || true
+          sudo umount -l /var/snap 2>/dev/null || true
+
+          # ضبط النواة: ذاكرة/IO/شفافية صفحات
+          sudo sysctl -w vm.swappiness=10 >/dev/null
+          sudo sysctl -w vm.dirty_ratio=15 >/dev/null
+          sudo sysctl -w vm.dirty_background_ratio=5 >/dev/null
+          sudo sysctl -w net.core.somaxconn=1024 >/dev/null
+          echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled >/dev/null 2>&1 || true
+
+          # حاكم ترددات الأداء إن وُجد
+          for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            [ -w "$g" ] && echo performance | sudo tee "$g" >/dev/null 2>&1
+          done
+
+          sudo journalctl --vacuum-size=20M >/dev/null 2>&1 || true
+          echo "host debloated · running services: $(systemctl list-units --type=service --state=running --no-legend | wc -l)"
+          free -m | head -2
+
+      # ── 4. سطح المكتب + Chrome + أدوات ───────────────────────────────────
       - name: Install desktop stack
         run: |
           sudo apt-get update -qq
@@ -204,6 +236,55 @@ jobs:
             done
           done
           tail -5 /tmp/emu0.log || true
+
+      # ── 8.b تنظيف أندرويد: إزالة التطبيقات/الخدمات الثقيلة غير الضرورية ──
+      - name: Debloat Android
+        run: |
+          export SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          ADB="$SDK/platform-tools/adb"
+          N=${{ inputs.instances }}
+
+          # تطبيقات/خدمات تُستهلك CPU وخلفية وبيانات بلا فائدة للاستخدام اليدوي
+          # (نبقي gms/gsf حتى لا تظهر نوافذ "توقف التطبيق")
+          PKGS="com.google.android.youtube
+          com.google.android.apps.youtube.music
+          com.google.android.apps.maps
+          com.google.android.gm
+          com.google.android.apps.photos
+          com.google.android.apps.docs
+          com.google.android.videos
+          com.google.android.music
+          com.google.android.googlequicksearchbox
+          com.google.android.apps.messaging
+          com.google.android.calendar
+          com.google.android.contacts
+          com.google.android.deskclock
+          com.google.android.apps.wellbeing
+          com.google.android.apps.turbo
+          com.google.android.partnersetup
+          com.google.android.setupwizard
+          com.google.android.apps.restore
+          com.google.android.feedback
+          com.google.android.printservice.recommendation
+          com.google.android.apps.safetyhub
+          com.google.android.apps.subscriptions.red
+          com.android.vending"
+
+          for i in $(seq 0 $((N-1))); do
+            DEV="emulator-$((5554 + i*2))"
+            for p in $PKGS; do
+              "$ADB" -s "$DEV" shell pm disable-user --user 0 "$p" >/dev/null 2>&1 || true
+            done
+            # إيقاف الحركات = استجابة أسرع وCPU أقل
+            for k in window_animation_scale transition_animation_scale animator_duration_scale; do
+              "$ADB" -s "$DEV" shell settings put global "$k" 0 >/dev/null 2>&1 || true
+            done
+            "$ADB" -s "$DEV" shell settings put global wifi_scan_always_enabled 0 >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell settings put global auto_time 0 >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell pm trim-caches 2G >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell "am kill-all" >/dev/null 2>&1 || true
+            echo "$DEV: debloated ($(echo $PKGS | wc -w) packages)"
+          done
 
       # ── 8. ADB عبر tailnet (لـscrcpy من جهازك) ───────────────────────────
       - name: Expose adb
