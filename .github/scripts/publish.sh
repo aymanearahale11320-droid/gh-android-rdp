@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Publishes a one-line status into a repo file so it can be read live from outside.
 # Requires: GH_TOKEN, GITHUB_REPOSITORY, jq, curl
 # Optional: STATUS_FILE (default: status.txt) - used to keep parallel slots separate.
