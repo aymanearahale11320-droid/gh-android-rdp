@@ -392,6 +392,11 @@ class MirrorWindow(tk.Toplevel):
                  "settings put global transition_animation_scale 0; "
                  "settings put global animator_duration_scale 0; "
                  "input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard'", timeout=25)
+        # تسريع الجهاز + دقة أخف (540x960) => إطارات أسرع وسلاسة أعلى
+        self._sh(f"{RADB} -s emulator-5554 shell 'cmd power set-fixed-performance-mode-enabled true "
+                 "2>/dev/null; wm size 540x960; wm density 240; svc power stayon true; am kill-all'",
+                 timeout=30)
+        self.hi_res = False
         self.after(0, lambda: self.msg.configure(text="متصل — بدء البث"))
 
         # عرض سريع عبر صور متتابعة (البث h264 غير موثوق على هذه الصور)
