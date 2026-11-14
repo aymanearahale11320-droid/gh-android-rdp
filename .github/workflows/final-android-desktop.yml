@@ -357,8 +357,19 @@ jobs:
           echo "xrdp=$(systemctl is-active xrdp)"
 
       # ── 8. انتظار الإقلاع + تخطي المعالج + فحص إنترنت TCP ────────────────
+      - name: Sanity check
+        run: |
+          echo "SANITY_START cwd=$(pwd) user=$(whoami)"
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          echo "SDK=$SDK"
+          ls -l "$SDK/platform-tools/adb" || true
+          "$SDK/platform-tools/adb" devices -l || true
+          echo "SANITY_END"
+
       - name: Wait for Android boot
         run: |
+          echo "WAITBOOT_START N=$N"
+          set -x
           set -uo pipefail
           SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
           ADB="$SDK/platform-tools/adb"
