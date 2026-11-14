@@ -152,6 +152,17 @@ case "${1:-help}" in
   open-url)
     [ -n "${2:-}" ] || { echo "usage: open-url URL"; exit 2; }
     "$ADB" -s "$DEV" shell am start -a android.intent.action.VIEW -d "$2" >/dev/null 2>&1
+    sleep 2
+    FOCUS=$("$ADB" -s "$DEV" shell "dumpsys window | grep mCurrentFocus" 2>/dev/null || true)
+    if echo "$FOCUS" | grep -q FirstRunActivity; then
+      # أول تشغيل لكروم: تجاوز شاشة الترحيب ثم أعد فتح الرابط
+      "$ADB" -s "$DEV" shell "input tap 360 1115" >/dev/null 2>&1 || true
+      sleep 2
+      "$ADB" -s "$DEV" shell "input keyevent 4" >/dev/null 2>&1 || true
+      sleep 1
+      "$ADB" -s "$DEV" shell am start -a android.intent.action.VIEW -d "$2" >/dev/null 2>&1 || true
+      sleep 1
+    fi
     echo "opened: $2"
     ;;
   ensure-clipper)
