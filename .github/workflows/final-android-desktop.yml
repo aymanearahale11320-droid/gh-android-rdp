@@ -382,6 +382,10 @@ jobs:
             for k in window_animation_scale transition_animation_scale animator_duration_scale; do
               "$ADB" -s "$DEV" shell settings put global "$k" 0 >/dev/null 2>&1 || true
             done
+            # سرعة/سلاسة: أداء ثابت، منع السبات، إيقاف فحص WiFi المستمر
+            "$ADB" -s "$DEV" shell "cmd power set-fixed-performance-mode-enabled true" >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell "svc power stayon true" >/dev/null 2>&1 || true
+            "$ADB" -s "$DEV" shell "settings put global wifi_scan_always_enabled 0" >/dev/null 2>&1 || true
           done
           for i in $(seq 0 $((N-1))); do
             DEV="emulator-$(( 5554 + i * 2 ))"
