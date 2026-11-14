@@ -145,6 +145,10 @@ case "${1:-help}" in
     nohup "$START" > "/tmp/emu$IDX.log" 2>&1 &
     echo "emulator restarted"
     ;;
+  wake)
+    "$ADB" -s "$DEV" shell "input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard; settings put system screen_off_timeout 2147483647" >/dev/null 2>&1 || true
+    echo "awake"
+    ;;
   pkgs)
     echo "enabled=$("$ADB" -s "$DEV" shell pm list packages -e 2>/dev/null | wc -l) disabled=$("$ADB" -s "$DEV" shell pm list packages -d 2>/dev/null | wc -l)"
     ;;

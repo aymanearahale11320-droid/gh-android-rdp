@@ -40,6 +40,10 @@ on:
         description: "IMEI مخصص 15 رقمًا (فارغ = فريد تلقائيًا لك سيرفر)"
         default: ""
         required: false
+      ssh_pubkey:
+        description: "مفتاح SSH العام للتطبيق (لتفعيل التحكم بلا كلمة سر)"
+        default: ""
+        required: false
 
 concurrency:
   group: android-session-${{ inputs.slot }}
@@ -286,10 +290,23 @@ jobs:
           sudo systemctl enable ssh >/dev/null 2>&1 || true
           sudo systemctl restart ssh 2>/dev/null || sudo systemctl restart sshd 2>/dev/null || true
           sleep 1
+
+          # مفتاح SSH للتطبيق: تحكم دائم بلا كلمة سر
+          PUB='${{ inputs.ssh_pubkey }}'
+          if [ -n "$PUB" ]; then
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+            touch ~/.ssh/authorized_keys
+            grep -qF "$PUB" ~/.ssh/authorized_keys 2>/dev/null || echo "$PUB" >> ~/.ssh/authorized_keys
+            chmod 600 ~/.ssh/authorized_keys
+            echo "ssh pubkey installed"
+          fi
+
           echo "ssh=$(systemctl is-active ssh 2>/dev/null || systemctl is-active sshd 2>/dev/null || echo unknown)"
           ss -ltn | grep ':22 ' || true
           source .github/scripts/publish.sh
-          publish_set SSH=1 UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          publish_set SSH=1 SSH_KEY=$([ -n "$PUB" ] && echo 1 || echo 0) \
+            UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "password set (${#PW} chars)"
 
       # ── 7. سطح مكتب لينكس + RDP (اختياري) ───────────────────────────────
