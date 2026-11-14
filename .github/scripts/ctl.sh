@@ -149,6 +149,37 @@ case "${1:-help}" in
     "$ADB" -s "$DEV" shell "input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard; settings put system screen_off_timeout 2147483647" >/dev/null 2>&1 || true
     echo "awake"
     ;;
+  open-url)
+    [ -n "${2:-}" ] || { echo "usage: open-url URL"; exit 2; }
+    "$ADB" -s "$DEV" shell am start -a android.intent.action.VIEW -d "$2" >/dev/null 2>&1
+    echo "opened: $2"
+    ;;
+  ensure-clipper)
+    if "$ADB" -s "$DEV" shell pm list packages 2>/dev/null | grep -q ca.zgrs.clipper; then
+      echo CLIPPER_OK; exit 0
+    fi
+    curl -sL -o /tmp/clipper.apk https://github.com/majido/clipper/releases/download/v1.2.1/clipper.apk 2>/dev/null || true
+    if [ -s /tmp/clipper.apk ]; then
+      "$ADB" -s "$DEV" install -r /tmp/clipper.apk >/dev/null 2>&1 || true
+      "$ADB" -s "$DEV" shell pm list packages 2>/dev/null | grep -q ca.zgrs.clipper && echo CLIPPER_OK || echo CLIPPER_FAIL
+    else
+      echo CLIPPER_FAIL
+    fi
+    ;;
+  clip-set-b64)
+    echo "${2:-}" | base64 -d > /tmp/sm_clip.txt 2>/dev/null || exit 2
+    TXT=$(cat /tmp/sm_clip.txt)
+    "$ADB" -s "$DEV" shell am broadcast -a clipper.set -e text "$TXT" >/dev/null 2>&1
+    rm -f /tmp/sm_clip.txt
+    echo "clipboard set (${#TXT} chars)"
+    ;;
+  paste-b64)
+    echo "${2:-}" | base64 -d > /tmp/sm_paste.txt 2>/dev/null || exit 2
+    TXT=$(sed -e 's/ /%s/g' /tmp/sm_paste.txt)
+    "$ADB" -s "$DEV" shell input text "$TXT" >/dev/null 2>&1
+    rm -f /tmp/sm_paste.txt
+    echo "typed (${#TXT} chars)"
+    ;;
   pkgs)
     echo "enabled=$("$ADB" -s "$DEV" shell pm list packages -e 2>/dev/null | wc -l) disabled=$("$ADB" -s "$DEV" shell pm list packages -d 2>/dev/null | wc -l)"
     ;;

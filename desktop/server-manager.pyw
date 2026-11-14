@@ -14,6 +14,7 @@ import io
 import os
 import re
 import secrets
+import shlex
 import socket
 import shutil
 import subprocess
@@ -342,6 +343,7 @@ class MirrorWindow(tk.Toplevel):
                          ("■", lambda: self._key(187)),
                          ("⏻", lambda: self._key(26)),
                          ("⚡", self._boost_perf),
+                         ("📋", self._smart_paste),
                          ("🔍", self._toggle_res)):
             tk.Button(bar, text=txt, command=cmd, bg=CARD, fg=FG, relief="flat",
                       width=3).pack(side="right", padx=1, pady=3)
@@ -465,6 +467,28 @@ class MirrorWindow(tk.Toplevel):
         threading.Thread(
             target=lambda: (self._sh(f"{RADB} -s emulator-5554 shell '{cmd}'", timeout=20),
                             self.after(0, lambda: self.msg.configure(text=text))),
+            daemon=True).start()
+
+    def _smart_paste(self):
+        """يقرأ حافظة الحاسوب: رابطًا يفتحه في كروم، وغير ذلك يكتبه في الحقل."""
+        try:
+            text = self.clipboard_get()
+        except Exception:
+            text = ""
+        if not text.strip():
+            self.msg.configure(text="حافظة الحاسوب فارغة")
+            return
+        url = self.app._as_url(text)
+        if url:
+            threading.Thread(
+                target=lambda: (self._sh(f"IDX=0 ~/bin/ctl.sh open-url {shlex.quote(url)}", timeout=20),
+                                self.after(0, lambda: self.msg.configure(text="فُتح الرابط في كروم"))),
+                daemon=True).start()
+            return
+        b64 = base64.b64encode(text.encode("utf-8")).decode()
+        threading.Thread(
+            target=lambda: (self._sh(f"IDX=0 ~/bin/ctl.sh paste-b64 {b64}", timeout=20),
+                            self.after(0, lambda: self.msg.configure(text="كُتب النص في الحقل"))),
             daemon=True).start()
 
     def _toggle_pause(self):
@@ -593,14 +617,10 @@ class MirrorWindow(tk.Toplevel):
 
     def close(self):
         self.running = False
+        # أعِد دقة الجهاز قبل إغلاق الاتصال (كانت تُفقد لأن الاتصال يُغلق أولًا)
         try:
             if self.client:
-                def restore():
-                    try:
-                        self._sh(f"{RADB} -s emulator-5554 shell 'wm size reset; wm density reset'", timeout=15)
-                    except Exception:
-                        pass
-                threading.Thread(target=restore, daemon=True).start()
+                self._sh(f"{RADB} -s emulator-5554 shell 'wm size reset; wm density reset'", timeout=12)
         except Exception:
             pass
         try:
@@ -736,6 +756,7 @@ class App(tk.Tk):
             ("pwset", "🔑 تعيين كلمة السر", self.set_password, None),
             ("mirror", "🪞 مِرآة الجهاز", self.open_mirror, None),
             ("sshkey", "🧬 مفتاح SSH", self.install_ssh_key, None),
+            ("clip", "📋 الحافظة", self.open_clipboard_dialog, None),
         ):
             b = ttk.Button(r2, text=txt, command=fn, style=style) if style else ttk.Button(r2, text=txt, command=fn)
             b.pack(side="right", padx=3)
@@ -903,7 +924,7 @@ class App(tk.Tk):
         setstate("pwset", bool(r))
         # كل ما يمر عبر SSH يحتاج مصادقة (مفتاح SSH أو كلمة سر)
         for k in ("stats", "shot", "apk", "geo", "aid_gen", "aid_apply",
-                  "proxy_on", "proxy_off", "play"):
+                  "proxy_on", "proxy_off", "play", "clip"):
             setstate(k, online and has_ip and has_auth)
         for k in ("scrcpy", "nav", "reboot", "chrome"):
             setstate(k, online and has_ip)
@@ -1505,6 +1526,90 @@ class App(tk.Tk):
                 return True
             time.sleep(0.4)
         return False
+
+    # ── الحافظة (نسخ/لصق بين الحاسوب والأندرويد) ──
+    def _win_clipboard(self):
+        try:
+            return self.clipboard_get()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _as_url(text):
+        t = (text or "").strip()
+        if not t or "\n" in t:
+            return ""
+        if re.match(r"^https?://\S+$", t, re.I):
+            return t
+        if re.match(r"^[\w.-]+\.[a-z]{2,}(/\S*)?$", t, re.I):
+            return "https://" + t
+        return ""
+
+    def open_clipboard_dialog(self):
+        """نافذة النسخ واللصق: رابط، نص، أو حافظة الأندرويد."""
+        if not self.require_sel():
+            return
+        r = self.selected
+        if not r.get("online") or not r.get("ip"):
+            messagebox.showinfo("تنبيه", "السيرفر غير متصل")
+            return
+        w = tk.Toplevel(self)
+        w.title("الحافظة — نسخ ولصق")
+        w.configure(bg=BG)
+        w.geometry("560x300")
+        w.transient(self)
+
+        tk.Label(w, text="محتوى حافظة الحاسوب:", bg=BG, fg=MUTED).pack(anchor="e", padx=12, pady=(10, 2))
+        box = tk.Text(w, height=4, bg="#0e0f14", fg=FG, relief="flat",
+                      font=("Consolas", 9), wrap="word", padx=8, pady=6)
+        box.pack(fill="x", padx=12)
+        box.insert("1.0", self._win_clipboard())
+        box.configure(state="normal")
+
+        def refresh():
+            box.delete("1.0", "end")
+            box.insert("1.0", self._win_clipboard())
+
+        btns = tk.Frame(w, bg=BG)
+        btns.pack(fill="x", padx=12, pady=10)
+
+        def do_open():
+            url = self._as_url(box.get("1.0", "end"))
+            if not url:
+                messagebox.showinfo("تنبيه", "المحتوى ليس رابطًا صالحًا", parent=w)
+                return
+            self.ctl(f"open-url {shlex.quote(url)}")
+            w.destroy()
+
+        def do_paste():
+            data = box.get("1.0", "end").rstrip("\n")
+            if not data:
+                messagebox.showinfo("تنبيه", "الحافظة فارغة", parent=w)
+                return
+            b64 = base64.b64encode(data.encode("utf-8")).decode()
+            self.ctl(f"paste-b64 {b64}")
+            w.destroy()
+
+        def do_clip():
+            data = box.get("1.0", "end").rstrip("\n")
+            if not data:
+                messagebox.showinfo("تنبيه", "الحافظة فارغة", parent=w)
+                return
+            b64 = base64.b64encode(data.encode("utf-8")).decode()
+            self.ctl(f"ensure-clipper")
+            time.sleep(0.2)
+            self.ctl(f"clip-set-b64 {b64}")
+            w.destroy()
+
+        ttk.Button(btns, text="🔗 افتح في كروم", style="Accent.TButton",
+                   command=do_open).pack(side="right", padx=3)
+        ttk.Button(btns, text="⌨ لصق كنص في الحقل", command=do_paste).pack(side="right", padx=3)
+        ttk.Button(btns, text="📋 ضع في حافظة الأندرويد", command=do_clip).pack(side="right", padx=3)
+        ttk.Button(btns, text="⟳ تحديث", command=refresh).pack(side="left", padx=3)
+        tk.Label(w, text="«افتح في كروم» يفتح الرابط مباشرة. «لصق كنص» يكتبه في الحقل المحدد. "
+                         "«حافظة الأندرويد» يتيح الضغط المطوّل ← لصق في أي تطبيق.",
+                 bg=PANEL, fg=MUTED, justify="right", wraplength=520,
+                 font=("Segoe UI", 8), padx=8, pady=6).pack(fill="x", padx=12, pady=(0, 10))
 
     def open_mirror(self):
         """مِرآة مدمجة: بث الشاشة عبر SSH + تحكم (تعمل في وضعي Play وroot)."""
