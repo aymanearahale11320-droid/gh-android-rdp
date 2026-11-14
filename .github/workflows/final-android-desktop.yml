@@ -164,7 +164,7 @@ jobs:
           for i in $(seq 0 $((N-1))); do
             NAME="emu$i"
             rm -rf "$AVD_HOME/$NAME.avd" "$AVD_HOME/$NAME.ini"
-            echo no | "$AM" create avd -n "$NAME" -k "$IMG" -d pixel_5 --force > /tmp/avd-$i.log 2>&1
+            echo no | "$AM" create avd -n "$NAME" -k "$IMG" -d pixel_5 --force > /tmp/avd-$i.log 2>&1 || true
             INI="$AVD_HOME/$NAME.avd/config.ini"
             if [ ! -f "$INI" ]; then
               echo "AVD $NAME creation failed:"; tail -10 /tmp/avd-$i.log; exit 1
@@ -357,27 +357,18 @@ jobs:
           echo "xrdp=$(systemctl is-active xrdp)"
 
       # ── 8. انتظار الإقلاع + تخطي المعالج + فحص إنترنت TCP ────────────────
-      - name: Sanity check
-        run: |
-          echo "SANITY_START cwd=$(pwd) user=$(whoami)"
-          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
-          echo "SDK=$SDK"
-          ls -l "$SDK/platform-tools/adb" || true
-          "$SDK/platform-tools/adb" devices -l || true
-          echo "SANITY_END"
-
       - name: Wait for Android boot
         run: |
-          echo "WAITBOOT_START N=$N"
-          set -x
           set -uo pipefail
           SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
           ADB="$SDK/platform-tools/adb"
           "$ADB" start-server >/dev/null 2>&1 || true
           T0=$(date +%s)
           for i in $(seq 1 150); do
-            B=$("$ADB" -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-            [ "$B" = "1" ] && break
+            # || true ضروري: adb يفشل قبل إقلاع المحاكي، ومع set -e/pipefail
+            # كان ذلك يُنهي الخطوة فورًا بدل مواصلة الانتظار.
+            B=$("$ADB" -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+            if [ "$B" = "1" ]; then break; fi
             sleep 2
           done
           echo "boot_completed in $(( $(date +%s) - T0 ))s"
@@ -487,12 +478,12 @@ jobs:
             "$ADB" -s "$DEV" shell "settings put global wifi_scan_always_enabled 0" >/dev/null 2>&1 || true
             "$ADB" -s "$DEV" shell "pm trim-caches 4G" >/dev/null 2>&1 || true
             "$ADB" -s "$DEV" shell "am kill-all" >/dev/null 2>&1 || true
-            ENABLED=$("$ADB" -s "$DEV" shell pm list packages -e 2>/dev/null | wc -l | tr -d '\r')
-            echo "$DEV: enabled packages = $ENABLED"
+            ENABLED=$("$ADB" -s "$DEV" shell pm list packages -e 2>/dev/null | wc -l | tr -d '\r' || true)
+            echo "$DEV: enabled packages = ${ENABLED:-?}"
           done
           for p in com.android.vending com.android.chrome com.android.settings com.google.android.gms; do
-            ST=$("$ADB" -s emulator-5554 shell pm list packages -e 2>/dev/null | grep -c "^package:$p$" | tr -d '\r')
-            echo "  $p enabled=$ST"
+            ST=$("$ADB" -s emulator-5554 shell pm list packages -e 2>/dev/null | grep -c "^package:$p$" || true)
+            echo "  $p enabled=${ST:-0}"
           done
           source .github/scripts/publish.sh
           publish_set APPS="$ENABLED" UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -40,7 +40,8 @@ publish_raw() {
 publish_set() {
   local cur tmp pair k v
   tmp=$(mktemp)
-  cur=$(_api_get | jq -r '.content // empty' 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || true)
+  # ملاحظة: محتوى GitHub API base64 قد يحتوي \r\n — يجب إزالة كليهما
+  cur=$(_api_get | jq -r '.content // empty' 2>/dev/null | tr -d '\r\n' | base64 -d 2>/dev/null || true)
   printf '%s' "$cur" | tr '|' '\n' | grep -E '^[A-Z0-9_]+=' > "$tmp" || true
   for pair in "$@"; do
     k=${pair%%=*}
