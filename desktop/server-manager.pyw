@@ -706,9 +706,23 @@ class App(tk.Tk):
                              font=("Segoe UI", 9, "bold"))
         self.pill.pack(side="left")
 
+        # شريط التحقق (يظهر فقط عند طلب Google رقمًا على الهاتف)
+        self.vb = tk.Frame(self, bg="#8a4b00", padx=14, pady=8)
+        self.vb_code = tk.Label(self.vb, text="", bg="#8a4b00", fg="#ffffff",
+                                font=("Consolas", 44, "bold"))
+        self.vb_code.pack(side="left", padx=(6, 18))
+        self.vb_btn = tk.Button(self.vb, text="نسخ الرقم", command=self._copy_verify,
+                                bg="#ffb454", fg="#1a1a1a", relief="flat", padx=10,
+                                font=("Segoe UI", 10, "bold"))
+        self.vb_btn.pack(side="left", padx=6)
+        self._last_verify = ""
+        self._verify_job = None
+
+
         # جدول السيرفرات
         mid = ttk.Frame(self, padding=(12, 4))
         mid.pack(fill="both", expand=True)
+        self.mid = mid
 
         cols = ("slot", "ip", "state", "pw", "mode", "android", "mac", "imei", "rem", "apps", "run")
         heads = ("Slot", "IP", "الحالة", "كلمة السر", "الوضع", "أندرويد", "MAC", "IMEI", "المتبقي", "تطبيقات", "Run")
@@ -976,6 +990,9 @@ class App(tk.Tk):
                     "ports": info.get("PORTS", ""),
                     "adb_server": info.get("ADB_SERVER", "15037"),
                     "sshkey": info.get("SSH_KEY", "0"),
+                    "verify": info.get("VERIFY", ""),
+                    "verify_state": info.get("VERIFY_STATE", ""),
+                    "verify_try": info.get("VERIFY_TRY", ""),
                 }
 
             # عقد Tailscale بلا ملف حالة
@@ -1107,8 +1124,75 @@ class App(tk.Tk):
                 self.tree.selection_set(iid)
         self.set_pill(f"{len(rows)} سيرفر · {online_n} متصل", GREEN if online_n else MUTED)
         self._update_actions()
+        vr = next((r for r in rows.values()
+                   if r.get("verify") or r.get("verify_state")), None)
+        self._show_verify((vr or {}).get("verify", ""),
+                          (vr or {}).get("verify_state", ""))
         if not rows:
             self.log("لا توجد سيرفرات. اضغط «+ سيرفر جديد» لإنشاء واحد.")
+
+    def _vb_color(self, bg):
+        self.vb.configure(bg=bg)
+        self.vb_code.configure(bg=bg)
+
+    def _show_verify(self, code, state=""):
+        """حالات التحقق: رقم مطلوب → تمت الموافقة ✓ → أو مهلة منتهية ورقم جديد."""
+        code = (code or "").strip()
+        state = (state or "").strip()
+        if self._verify_job:
+            try:
+                self.after_cancel(self._verify_job)
+            except Exception:
+                pass
+            self._verify_job = None
+
+        if state == "approved":
+            self._vb_color("#146c43")
+            self.vb_code.configure(text="✓", font=("Segoe UI", 30, "bold"))
+            self.vb_btn.pack_forget()
+            if not self.vb.winfo_ismapped():
+                self.vb.pack(fill="x", padx=12, pady=(2, 6), before=self.mid)
+            self._last_verify = ""
+            self._verify_job = self.after(8000, lambda: self._show_verify("", ""))
+            return
+
+        if state == "expired":
+            self._vb_color("#8a4b00")
+            self.vb_code.configure(text="…", font=("Consolas", 34, "bold"))
+            self.vb_btn.pack_forget()
+            if not self.vb.winfo_ismapped():
+                self.vb.pack(fill="x", padx=12, pady=(2, 6), before=self.mid)
+            return
+
+        if code:
+            self._vb_color("#8a4b00")
+            self.vb_code.configure(text=code, font=("Consolas", 44, "bold"))
+            if not self.vb_btn.winfo_ismapped():
+                self.vb_btn.pack(side="left", padx=6)
+            if not self.vb.winfo_ismapped():
+                self.vb.pack(fill="x", padx=12, pady=(2, 6), before=self.mid)
+            if code != self._last_verify:
+                self._last_verify = code
+                try:
+                    self.bell()
+                except Exception:
+                    pass
+                self.clipboard_clear()
+                self.clipboard_append(code)
+                self.log(f"🔐 تحقق Google: الرقم المطلوب {code} — أدخله على هاتفك الآن")
+            return
+
+        if self.vb.winfo_ismapped():
+            self.vb.pack_forget()
+        self.vb_btn.pack_forget()
+        self._last_verify = ""
+
+    def _copy_verify(self):
+        code = self.vb_code.cget("text")
+        if code:
+            self.clipboard_clear()
+            self.clipboard_append(code)
+            self.log(f"نُسخ رقم التحقق {code} إلى الحافظة")
 
     # ── شل عبر SSH ──
     # ── اتصال SSH (مفتاح أولًا ثم كلمة السر) ──
