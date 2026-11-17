@@ -21,8 +21,8 @@ on:
         default: "1"
         required: false
       api_level:
-        description: "Android API level (30 = Android 11)"
-        default: "30"
+        description: "Android API level (35 = Android 15 — مطلوب لتشغيل تطبيقات ARM 64 مثل تيك توك)"
+        default: "35"
         required: false
       mode:
         description: "play = Google Play (بلا روت) | root = روت كامل (بلا Play)"
@@ -72,6 +72,10 @@ jobs:
           API=${{ inputs.api_level }}
           UNAME=runner
           START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          # صورة API 30 فيها علة مترجم ARM (guest_call_arm64.cc) تُسقط تيك توك لايت
+          # فرض API 35 في وضع Play مع نفس إعدادات الأداء (4 نوى / 8GB / swiftshader)
+          if [ "$MODE" = "play" ] && [ "${API%%.*}" -lt 35 ] 2>/dev/null; then API=35; fi
 
           if [ "$MODE" = "root" ]; then IMG_TAG=google_apis; ROOT=1
           else IMG_TAG=google_apis_playstore; ROOT=0; fi
@@ -163,7 +167,7 @@ jobs:
 
       # ── 3b. تنزيل صورة الحساب المسجّل (مشفّرة) ───────────────────────────
       - name: Fetch Google account seed
-        if: inputs.mode == 'play'
+        if: false  # بذرة API 30 غير متوافقة مع صورة API 35 — تسجيل دخول جديد تلقائيًا
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -219,7 +223,7 @@ jobs:
 
           # استعادة حساب Google المحفوظ (userdata + مفتاح التشفير) إن وُجد
           SEED=/opt/android-server/gplay-seed-api30-v1.enc
-          if [ -f "$SEED" ] && [ -n "${GPLAY_SEED_KEY:-}" ]; then
+          if [ "$API" = "30" ] && [ -f "$SEED" ] && [ -n "${GPLAY_SEED_KEY:-}" ]; then
             echo "restoring google seed..."
             rm -rf /tmp/gseed && mkdir -p /tmp/gseed
             openssl enc -d -aes-256-cbc -pbkdf2 -in "$SEED" -out /tmp/gseed.tar.zst -pass env:GPLAY_SEED_KEY
@@ -588,6 +592,15 @@ jobs:
           fi
           python .github/scripts/gplay_login.py || echo "google sign-in returned $?"
           python ~/bin/play-setup.py || echo "play helper returned $?"
+
+      # ── 10c. تثبيت تيك توك لايت من Play (بعد تسجيل الدخول) ───────────────
+      - name: Install TikTok Lite
+        if: inputs.mode == 'play'
+        timeout-minutes: 10
+        run: |
+          set -uo pipefail
+          python3 -m pip install --quiet uiautomator2 adbutils 2>/dev/null || true
+          python .github/scripts/install_tiktok.py || echo "tiktok install returned $?"
 
       # ── 11. أدوات التحكم + كشف adb ───────────────────────────────────────
       - name: Controls and adb expose
