@@ -570,13 +570,15 @@ jobs:
           fi
           SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
           ADB="$SDK/platform-tools/adb"
+          python -m pip install --quiet uiautomator2 adbutils
           if "$ADB" -s emulator-5554 shell dumpsys account 2>/dev/null | grep -qi "$GPLAY_EMAIL"; then
             source .github/scripts/publish.sh
             publish_set GPLAY=1 VERIFY= VERIFY_STATE= UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "google account already signed in via seed - skipping"
+            echo "google account already signed in via seed - finishing play setup"
+            # أكمل شاشات Play الأولى (Use password / Get started) التي لا تظهر في screencap
+            python .github/scripts/gplay_login.py --setup-only || echo "play setup returned $?"
             exit 0
           fi
-          python -m pip install --quiet uiautomator2 adbutils
           python .github/scripts/gplay_login.py || echo "google sign-in returned $?"
 
       # ── 11. أدوات التحكم + كشف adb ───────────────────────────────────────
