@@ -137,6 +137,22 @@ jobs:
           fi
           echo "socat=$(command -v socat || echo MISSING) sshd=$(command -v sshd || echo MISSING)"
 
+      # ── 2b. مفتاح adb الثابت (مطابق للحساب المحفوظ) ──────────────────────
+      - name: Restore adb key
+        env:
+          ADB_KEY_B64: ${{ secrets.ADB_PRIVATE_B64 }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$HOME/.android"
+          if [ -n "$ADB_KEY_B64" ]; then
+            printf '%s' "$ADB_KEY_B64" | base64 -d > "$HOME/.android/adbkey"
+            chmod 600 "$HOME/.android/adbkey"
+            rm -f "$HOME/.android/adbkey.pub"
+            echo "adb key restored"
+          else
+            echo "no adb key secret"
+          fi
+
       # ── 3. كاش صورة النظام (أكبر مكسب للسرعة بعد أول تشغيل) ──────────────
       - name: Cache Android images
         id: imgcache
@@ -201,19 +217,23 @@ jobs:
             fi
           done
 
-          # استعادة حساب Google المحفوظ (مشفّر AES) إن وُجد
+          # استعادة حساب Google المحفوظ (userdata + مفتاح التشفير) إن وُجد
           SEED=/opt/android-server/gplay-seed-api30-v1.enc
           if [ -f "$SEED" ] && [ -n "${GPLAY_SEED_KEY:-}" ]; then
             echo "restoring google seed..."
-            openssl enc -d -aes-256-cbc -pbkdf2 -in "$SEED" -out /tmp/seed.zst -pass env:GPLAY_SEED_KEY
-            zstd -d -f -q /tmp/seed.zst -o /tmp/seed.img
-            rm -f /tmp/seed.zst
+            rm -rf /tmp/gseed && mkdir -p /tmp/gseed
+            openssl enc -d -aes-256-cbc -pbkdf2 -in "$SEED" -out /tmp/gseed.tar.zst -pass env:GPLAY_SEED_KEY
+            zstd -d -f -q /tmp/gseed.tar.zst -o /tmp/gseed.tar
+            tar -C /tmp/gseed -xf /tmp/gseed.tar
+            rm -f /tmp/gseed.tar /tmp/gseed.tar.zst
             for i in $(seq 0 $((N-1))); do
-              cp --sparse=always /tmp/seed.img "$AVD_HOME/emu$i.avd/userdata-qemu.img"
-              rm -f "$AVD_HOME/emu$i.avd/userdata-qemu.img.qcow2"
-              echo "emu$i: google account restored"
+              cp --sparse=always /tmp/gseed/userdata-qemu.img "$AVD_HOME/emu$i.avd/userdata-qemu.img"
+              cp /tmp/gseed/encryptionkey.img "$AVD_HOME/emu$i.avd/encryptionkey.img"
+              rm -f "$AVD_HOME/emu$i.avd/userdata-qemu.img.qcow2" \
+                    "$AVD_HOME/emu$i.avd/encryptionkey.img.qcow2"
+              echo "emu$i: google account + encryption key restored"
             done
-            rm -f /tmp/seed.img
+            rm -rf /tmp/gseed
           else
             echo "no google seed (first run will sign in)"
           fi
