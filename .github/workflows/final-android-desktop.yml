@@ -299,6 +299,10 @@ jobs:
           done
           echo "TS_IP=$TS_IP" >> "$GITHUB_ENV"
           echo "tailscale ip: ${TS_IP:-none}"
+          if [ -n "$TS_IP" ]; then
+            publish_set IP="$TS_IP" HOST="$HOST" UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "IP published: $TS_IP"
+          fi
 
       # ── 6. SSH + كلمة سر لكل سيرفر (إصلاح تجاوز drop-in) ────────────────
       - name: SSH and password
