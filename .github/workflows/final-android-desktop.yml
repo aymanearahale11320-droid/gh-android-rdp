@@ -670,16 +670,42 @@ jobs:
           source .github/scripts/publish.sh
           END=$(( $(date +%s) + 330*60 ))
           LAST_HB=0
+          declare -a FAILS
+          for i in $(seq 0 $((N-1))); do FAILS[$i]=0; done
           while [ "$(date +%s)" -lt "$END" ]; do
+            "$ADB" start-server >/dev/null 2>&1 || true
             for i in $(seq 0 $((N-1))); do
               PORT=$(( 5554 + i * 2 )); EXT=$(( 15555 + i * 2 ))
-              if ! pgrep -f "avd emu$i" >/dev/null 2>&1; then
-                echo "[$(date +%H:%M:%S)] emu$i dead -> restart"
+              QPID=$(pgrep -f "avd emu$i" | head -1 || true)
+              ALIVE=0
+              if [ -n "$QPID" ]; then
+                QSTAT=$(ps -o stat= -p "$QPID" 2>/dev/null | tr -d ' ')
+                case "$QSTAT" in *Z*) ALIVE=0 ;; *) ALIVE=1 ;; esac
+              fi
+              BOOT=$("$ADB" -s "emulator-$PORT" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+              if [ "$ALIVE" -eq 0 ] || [ "$BOOT" != "1" ]; then
+                FAILS[$i]=$(( FAILS[$i] + 1 ))
+              else
+                FAILS[$i]=0
+              fi
+              if [ "${FAILS[$i]}" -ge 3 ]; then
+                echo "[$(date +%H:%M:%S)] emu$i unhealthy (alive=$ALIVE boot=$BOOT) -> restart"
                 publish_set STATE=booting UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                pkill -f "avd emu$i" 2>/dev/null || true
+                sleep 4
                 nohup /opt/android-server/start-$i.sh > "/tmp/emu$i.log" 2>&1 &
-                sleep 45
+                BOOT2=""
+                for w in $(seq 1 90); do
+                  sleep 3
+                  BOOT2=$("$ADB" -s "emulator-$PORT" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+                  [ "$BOOT2" = "1" ] && break
+                done
                 "$ADB" -s "emulator-$PORT" shell "settings put global device_provisioned 1; svc wifi disable" >/dev/null 2>&1 || true
-                publish_set STATE=ready UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                echo "[$(date +%H:%M:%S)] emu$i restarted boot=$BOOT2"
+                if [ "$BOOT2" = "1" ]; then
+                  publish_set STATE=ready UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                fi
+                FAILS[$i]=0
               fi
               if ! ss -ltn 2>/dev/null | grep -q ":$EXT "; then
                 nohup socat TCP-LISTEN:$EXT,fork,reuseaddr TCP:127.0.0.1:$(( 5555 + i * 2 )) >> "/tmp/socat$i.log" 2>&1 &
@@ -697,8 +723,8 @@ jobs:
               publish_set UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
               LAST_HB=$NOW
             fi
-            echo "[$(date +%H:%M:%S)] qemu=$(pgrep -fc qemu-system-x86_64 2>/dev/null || echo 0) mem=$(free -m | awk '/Mem:/{print $3"MB"}')"
-            sleep 120
+            echo "[$(date +%H:%M:%S)] qemu=$(pgrep -fc qemu-system-x86_64 2>/dev/null || echo 0) fails=${FAILS[*]} mem=$(free -m | awk '/Mem:/{print $3"MB"}')"
+            sleep 60
           done
 
       # ── 15. تنظيف (يزيل الجهاز من Tailscale) ─────────────────────────────
