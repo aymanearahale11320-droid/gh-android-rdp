@@ -557,7 +557,7 @@ jobs:
       # ── 10b. تسجيل دخول Google تلقائيًا (وضع Play) ───────────────────────
       # ينشر VERIFY=<الرقم> في ملف الحالة ليظهر فورًا في تطبيق Server Manager
       - name: Google sign-in (play)
-        if: inputs.mode == 'play'
+        if: false  # معطّل: تسجيل الدخول التلقائي كان يضيف دقائق وانتظار هاتف — الإقلاع أسرع بدونه
         timeout-minutes: 20
         env:
           GH_TOKEN: ${{ github.token }}
@@ -598,7 +598,7 @@ jobs:
 
       # ── 10c. تثبيت تيك توك لايت من Play (بعد تسجيل الدخول) ───────────────
       - name: Install TikTok Lite
-        if: inputs.mode == 'play'
+        if: false  # معطّل: التثبيت يتم عبر شريط الأوامر عند الطلب
         timeout-minutes: 10
         run: |
           set -uo pipefail
