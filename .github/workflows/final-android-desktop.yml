@@ -580,6 +580,7 @@ jobs:
           printf '%s' "$GPLAY_PASSWORD" | sudo tee /opt/android-server/gplay_pw >/dev/null
           sudo chmod 600 /opt/android-server/gplay_pw
           sudo chown runner:runner /opt/android-server/gplay_pw
+          mkdir -p ~/bin
           install -m 700 .github/scripts/play-setup.py ~/bin/play-setup.py
           if "$ADB" -s emulator-5554 shell dumpsys account 2>/dev/null | grep -qi "$GPLAY_EMAIL"; then
             source .github/scripts/publish.sh
