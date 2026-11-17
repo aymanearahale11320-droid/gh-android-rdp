@@ -26,6 +26,7 @@ TIMEOUT = int(os.environ.get("GPLAY_TIMEOUT", "900"))
 VERIFY_WAIT = int(os.environ.get("GPLAY_VERIFY_WAIT", "75"))
 VERIFY_TRIES = int(os.environ.get("GPLAY_VERIFY_TRIES", "5"))
 PUBLISH = os.environ.get("GPLAY_PUBLISH", "1") != "0" and bool(os.environ.get("GH_TOKEN"))
+SETUP_ONLY = "--setup-only" in sys.argv
 
 
 def log(*a):
@@ -106,6 +107,52 @@ def signed_in(d):
         return False
     out = getattr(out, "output", None) or str(out)
     return EMAIL.lower() in str(out).lower()
+
+
+def finish_play_setup(d):
+    """أكمل إعداد متجر Play بعد استعادة البذرة.
+
+    شاشة «Use password» نافذة آمنة (FLAG_SECURE) لا تظهر في screencap،
+    فتبدو المِرآة سوداء. نُدخل كلمة السر ونضغط Done عبر uiautomator ثم
+    نُغلق تلميحات القائمة حتى يصل المستخدم إلى متجر جاهز ومرئي.
+    """
+    try:
+        d.shell("monkey -p com.android.vending -c android.intent.category.LAUNCHER 1")
+    except Exception:
+        pass
+    end = time.time() + 90
+    while time.time() < end:
+        ts = texts(d)
+        joined = " ".join(ts).lower()
+        try:
+            if "use password" in joined or "verify your purchases" in joined:
+                tap_text(d, "Use password")
+                time.sleep(2)
+                els = d(className="android.widget.EditText")
+                if els.count:
+                    els[0].set_text(PASSWORD)
+                    time.sleep(1)
+                    tap_text(d, "Done")
+                    time.sleep(4)
+                continue
+            if "get started" in joined or "welcome to google play" in joined:
+                tap_text(d, "Get started")
+                time.sleep(3)
+                continue
+            if "got it" in joined:
+                tap_text(d, "Got it")
+                time.sleep(1)
+                continue
+            if ("signed in as" in joined or "top charts" in joined
+                    or "recommended for you" in joined):
+                log("play store ready")
+                d.press("home")
+                return True
+        except Exception as e:
+            log("play setup step:", repr(e))
+        time.sleep(2)
+    log("play setup timeout (continuing)")
+    return False
 
 
 def find_code(ts):
@@ -202,8 +249,13 @@ def main():
     d = u2.connect(SERIAL)
     log("connected", d.info.get("productName"), d.info.get("sdkInt"))
 
+    if SETUP_ONLY:
+        finish_play_setup(d)
+        return 0
+
     if signed_in(d):
         log("already signed in")
+        finish_play_setup(d)
         publish(GPLAY=1, VERIFY="")
         return 0
 
@@ -249,6 +301,7 @@ def main():
 
     if handle_verify(d):
         log("signed in")
+        finish_play_setup(d)
         publish(GPLAY=1, VERIFY="", VERIFY_STATE="")
         return 0
 
@@ -256,6 +309,7 @@ def main():
     while time.time() < end:
         if signed_in(d):
             log("signed in")
+            finish_play_setup(d)
             publish(GPLAY=1, VERIFY="", VERIFY_STATE="")
             return 0
         ts = texts(d)
