@@ -330,6 +330,7 @@ class MirrorWindow(tk.Toplevel):
         self.client = None
         self.in_chan = None
         self.dev_w = self.dev_h = 0
+        self._img_w = self._img_h = 0   # حجم الصورة المعروضة فعليًا داخل اللابل
         self.frames = 0
         self.t_fps = time.time()
         self.fps = 0.0
@@ -558,18 +559,25 @@ class MirrorWindow(tk.Toplevel):
         self.paused = not self.paused
         self.pause_btn.configure(text="▶" if self.paused else "⏸")
 
-    # ── لمس ──
+    # ── لمس (إحداثيات دقيقة + إجراء واحد فقط لكل ضغطة) ──
     def _dev_xy(self, x, y):
-        w = max(self.canvas.winfo_width(), 1)
-        h = max(self.canvas.winfo_height(), 1)
-        return int(x * self.dev_w / w), int(y * self.dev_h / h)
+        """يحوّل إحداثيات النافذة إلى إحداثيات الجهاز مع مراعاة
+        هوامش توسيط الصورة داخل اللابل — سبب النقر على شيء آخر."""
+        iw = self._img_w or max(self.canvas.winfo_width(), 1)
+        ih = self._img_h or max(self.canvas.winfo_height(), 1)
+        cw = max(self.canvas.winfo_width(), 1)
+        ch = max(self.canvas.winfo_height(), 1)
+        ox = (cw - iw) // 2
+        oy = (ch - ih) // 2
+        dx = (x - ox) * self.dev_w / iw
+        dy = (y - oy) * self.dev_h / ih
+        return (max(0, min(self.dev_w - 1, int(dx))),
+                max(0, min(self.dev_h - 1, int(dy))))
 
     def _click(self, ev):
-        if not self.dev_w:
-            return
-        self._drag = (ev.x, ev.y, ev.x, ev.y)
-        dx, dy = self._dev_xy(ev.x, ev.y)
-        self._send(f"input tap {dx} {dy}")
+        # لا نرسل شيئًا هنا — القرار في _drag_end (نقرة أو سحبة واحدة فقط)
+        if self.dev_w:
+            self._drag = (ev.x, ev.y, ev.x, ev.y)
 
     def _drag_move(self, ev):
         if self._drag:
@@ -580,10 +588,13 @@ class MirrorWindow(tk.Toplevel):
             self._drag = None
             return
         x1, y1, _, _ = self._drag
-        if abs(ev.x - x1) > 6 or abs(ev.y - y1) > 6:
+        if abs(ev.x - x1) > 8 or abs(ev.y - y1) > 8:
             a = self._dev_xy(x1, y1)
             b = self._dev_xy(ev.x, ev.y)
             self._send(f"input swipe {a[0]} {a[1]} {b[0]} {b[1]} 180")
+        else:
+            a = self._dev_xy(x1, y1)
+            self._send(f"input tap {a[0]} {a[1]}")
         self._drag = None
 
     # ── عرض ──
@@ -599,6 +610,7 @@ class MirrorWindow(tk.Toplevel):
         ph = ImageTk.PhotoImage(img)
         self.canvas.configure(image=ph, text="")
         self.canvas.image = ph
+        self._img_w, self._img_h = img.size
         self.frames += 1
         now = time.time()
         if now - self.t_fps >= 1.0:
