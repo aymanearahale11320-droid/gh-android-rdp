@@ -571,15 +571,23 @@ jobs:
           SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
           ADB="$SDK/platform-tools/adb"
           python -m pip install --quiet uiautomator2 adbutils
+          # احفظ كلمة سر Google على السيرفر فقط (من secret) + مساعد إكمال إعداد Play
+          sudo install -d -m 700 /opt/android-server
+          printf '%s' "$GPLAY_PASSWORD" | sudo tee /opt/android-server/gplay_pw >/dev/null
+          sudo chmod 600 /opt/android-server/gplay_pw
+          sudo chown runner:runner /opt/android-server/gplay_pw
+          install -m 700 .github/scripts/play-setup.py ~/bin/play-setup.py
           if "$ADB" -s emulator-5554 shell dumpsys account 2>/dev/null | grep -qi "$GPLAY_EMAIL"; then
             source .github/scripts/publish.sh
             publish_set GPLAY=1 VERIFY= VERIFY_STATE= UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "google account already signed in via seed - finishing play setup"
             # أكمل شاشات Play الأولى (Use password / Get started) التي لا تظهر في screencap
             python .github/scripts/gplay_login.py --setup-only || echo "play setup returned $?"
+            python ~/bin/play-setup.py || echo "play helper returned $?"
             exit 0
           fi
           python .github/scripts/gplay_login.py || echo "google sign-in returned $?"
+          python ~/bin/play-setup.py || echo "play helper returned $?"
 
       # ── 11. أدوات التحكم + كشف adb ───────────────────────────────────────
       - name: Controls and adb expose
