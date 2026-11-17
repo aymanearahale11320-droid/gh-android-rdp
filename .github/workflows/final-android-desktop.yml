@@ -128,6 +128,7 @@ jobs:
         run: |
           NEED=""
           command -v socat >/dev/null || NEED="$NEED socat"
+          command -v zstd >/dev/null || NEED="$NEED zstd"
           dpkg -s openssh-server >/dev/null 2>&1 || NEED="$NEED openssh-server"
           if [ -n "$NEED" ]; then
             sudo apt-get update -qq
@@ -143,8 +144,23 @@ jobs:
           path: /usr/local/lib/android/sdk/system-images
           key: sysimg-${{ inputs.api_level }}-${{ inputs.mode }}-v4
 
+      # ── 3b. تنزيل صورة الحساب المسجّل (مشفّرة) ───────────────────────────
+      - name: Fetch Google account seed
+        if: inputs.mode == 'play'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          mkdir -p /opt/android-server
+          gh release download gplay-seed --pattern 'gplay-seed-api30-v1.enc' \
+            --dir /opt/android-server --clobber 2>/dev/null \
+            && echo "seed ready: $(du -h /opt/android-server/gplay-seed-api30-v1.enc | cut -f1)" \
+            || echo "no google seed available (will sign in this run)"
+
       # ── 4. SDK + AVD + IMEI + إطلاق المحاكي مبكرًا ───────────────────────
       - name: Build AVDs and launch emulators
+        env:
+          GPLAY_SEED_KEY: ${{ secrets.GPLAY_SEED_KEY }}
         run: |
           set -uo pipefail
           SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
@@ -183,6 +199,23 @@ jobs:
               printf '%s\n' 'PlayStore.enabled=false' "tag.id=$IMG_TAG" 'tag.display=Google APIs' >> "$INI"
             fi
           done
+
+          # استعادة حساب Google المحفوظ (مشفّر AES) إن وُجد
+          SEED=/opt/android-server/gplay-seed-api30-v1.enc
+          if [ -f "$SEED" ] && [ -n "${GPLAY_SEED_KEY:-}" ]; then
+            echo "restoring google seed..."
+            openssl enc -d -aes-256-cbc -pbkdf2 -in "$SEED" -out /tmp/seed.zst -pass env:GPLAY_SEED_KEY
+            zstd -d -f -q /tmp/seed.zst -o /tmp/seed.img
+            rm -f /tmp/seed.zst
+            for i in $(seq 0 $((N-1))); do
+              cp --sparse=always /tmp/seed.img "$AVD_HOME/emu$i.avd/userdata-qemu.img"
+              rm -f "$AVD_HOME/emu$i.avd/userdata-qemu.img.qcow2"
+              echo "emu$i: google account restored"
+            done
+            rm -f /tmp/seed.img
+          else
+            echo "no google seed (first run will sign in)"
+          fi
 
           # IMEI: ترقيع ثابت qemu (سلسلة واحدة 358240051111110)
           QEMU_REL="qemu/linux-x86_64/qemu-system-x86_64"
@@ -491,6 +524,35 @@ jobs:
           done
           source .github/scripts/publish.sh
           publish_set APPS="$ENABLED" UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      # ── 10b. تسجيل دخول Google تلقائيًا (وضع Play) ───────────────────────
+      # ينشر VERIFY=<الرقم> في ملف الحالة ليظهر فورًا في تطبيق Server Manager
+      - name: Google sign-in (play)
+        if: inputs.mode == 'play'
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GPLAY_EMAIL: ${{ secrets.GOOGLE_EMAIL }}
+          GPLAY_PASSWORD: ${{ secrets.GOOGLE_PASSWORD }}
+          GPLAY_TIMEOUT: "900"
+          GPLAY_VERIFY_WAIT: "75"
+          GPLAY_VERIFY_TRIES: "5"
+        run: |
+          set -uo pipefail
+          if [ -z "$GPLAY_EMAIL" ] || [ -z "$GPLAY_PASSWORD" ]; then
+            echo "google credentials not configured - skipping"
+            exit 0
+          fi
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          ADB="$SDK/platform-tools/adb"
+          if "$ADB" -s emulator-5554 shell dumpsys account 2>/dev/null | grep -qi "$GPLAY_EMAIL"; then
+            source .github/scripts/publish.sh
+            publish_set GPLAY=1 VERIFY= VERIFY_STATE= UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "google account already signed in via seed - skipping"
+            exit 0
+          fi
+          python -m pip install --quiet uiautomator2 adbutils
+          python .github/scripts/gplay_login.py || echo "google sign-in returned $?"
 
       # ── 11. أدوات التحكم + كشف adb ───────────────────────────────────────
       - name: Controls and adb expose
