@@ -715,6 +715,10 @@ class App(tk.Tk):
                                 bg="#ffb454", fg="#1a1a1a", relief="flat", padx=10,
                                 font=("Segoe UI", 10, "bold"))
         self.vb_btn.pack(side="left", padx=6)
+        self.vb_txt = tk.Label(self.vb, text="", bg="#8a4b00", fg="#ffffff",
+                               justify="left", anchor="w",
+                               font=("Segoe UI", 14, "bold"))
+        self.vb_txt.pack(side="left", padx=(14, 6))
         self._last_verify = ""
         self._verify_job = None
 
@@ -1134,11 +1138,14 @@ class App(tk.Tk):
     def _vb_color(self, bg):
         self.vb.configure(bg=bg)
         self.vb_code.configure(bg=bg)
+        self.vb_txt.configure(bg=bg)
 
     def _show_verify(self, code, state=""):
         """حالات التحقق: رقم مطلوب → تمت الموافقة ✓ → أو مهلة منتهية ورقم جديد."""
         code = (code or "").strip()
         state = (state or "").strip()
+        if code and not code.isdigit():
+            code = ""
         if self._verify_job:
             try:
                 self.after_cancel(self._verify_job)
@@ -1149,6 +1156,7 @@ class App(tk.Tk):
         if state == "approved":
             self._vb_color("#146c43")
             self.vb_code.configure(text="✓", font=("Segoe UI", 30, "bold"))
+            self.vb_txt.configure(text="تمت الموافقة")
             self.vb_btn.pack_forget()
             if not self.vb.winfo_ismapped():
                 self.vb.pack(fill="x", padx=12, pady=(2, 6), before=self.mid)
@@ -1159,6 +1167,7 @@ class App(tk.Tk):
         if state == "expired":
             self._vb_color("#8a4b00")
             self.vb_code.configure(text="…", font=("Consolas", 34, "bold"))
+            self.vb_txt.configure(text="انتهت المهلة — رقم جديد…")
             self.vb_btn.pack_forget()
             if not self.vb.winfo_ismapped():
                 self.vb.pack(fill="x", padx=12, pady=(2, 6), before=self.mid)
@@ -1167,8 +1176,9 @@ class App(tk.Tk):
         if code:
             self._vb_color("#8a4b00")
             self.vb_code.configure(text=code, font=("Consolas", 44, "bold"))
+            self.vb_txt.configure(text="اختر هذا الرقم على هاتفك")
             if not self.vb_btn.winfo_ismapped():
-                self.vb_btn.pack(side="left", padx=6)
+                self.vb_btn.pack(side="left", padx=6, before=self.vb_txt)
             if not self.vb.winfo_ismapped():
                 self.vb.pack(fill="x", padx=12, pady=(2, 6), before=self.mid)
             if code != self._last_verify:
