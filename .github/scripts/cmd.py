@@ -38,11 +38,52 @@ HELP = """الأوامر المتاحة / available commands:
   home | الرئيسية                          → الشاشة الرئيسية
   back | رجوع                             → رجوع
   stats | الأداء                           → إحصائيات السيرفر
+  speedtest | سبيد تست                     → افتح كروم → GO → نتيجة السرعة
   !adb <args>                              → تمرير adb مباشر
   !ctl <args>                              → تمرير ctl.sh مباشر
   !sh <cmd>                                → تمرير shell مباشر
   help | مساعدة                            → هذه القائمة
 """
+
+
+def speedtest():
+    """يفتح Speedtest في كروم، يضغط GO، ويعيد نتيجة القياس."""
+    import time as _t
+    import re as _re
+    out = []
+    out.append(sh(f"bash {CTL} open-url https://www.speedtest.net", timeout=60))
+    try:
+        import uiautomator2 as u2
+        d = u2.connect(DEV)
+        # انتظر تحميل الصفحة وزر GO
+        for _ in range(15):
+            xml = d.dump_hierarchy()
+            ts = [t for t in _re.findall(r'text="([^"]*)"', xml) if t.strip()]
+            if any(t.strip().lower() in ("go", "start", "ابدأ") for t in ts):
+                break
+            _t.sleep(2)
+        tapped = False
+        for label in ("GO", "Go", "go", "Start", "ابدأ"):
+            try:
+                el = d(text=label)
+                if el.exists:
+                    el.click()
+                    tapped = True
+                    out.append("tapped GO")
+                    break
+            except Exception:
+                pass
+        if not tapped:
+            out.append("لم أجد زر GO — اضغطه يدويًا في المِرآة")
+        _t.sleep(50)
+        xml = d.dump_hierarchy()
+        vals = [t for t in _re.findall(r'text="([^"]*)"', xml) if t.strip()]
+        interesting = [t for t in vals if any(
+            k in t.lower() for k in ("mbps", "ping", "download", "upload", " ms"))]
+        out.append("RESULT: " + (" | ".join(interesting[:14]) or "لا توجد نتيجة بعد"))
+    except Exception as e:
+        out.append(f"speedtest UI error: {e}")
+    return "\n".join(out)
 
 
 def run(line):
@@ -51,6 +92,8 @@ def run(line):
 
     if low in ("help", "?", "مساعدة", "أوامر"):
         return HELP
+    if low in ("speedtest", "سبيد تست", "قياس السرعة", "سرعة الانترنت", "سرعة الإنترنت"):
+        return speedtest()
 
     # تمرير مباشر
     for prefix, fn in (("!adb ", lambda r: adb(r)),
