@@ -848,6 +848,19 @@ class App(tk.Tk):
         self.sel_lbl = ttk.Label(r2, text="لم يتم اختيار سيرفر", style="Muted.TLabel")
         self.sel_lbl.pack(side="left", padx=6)
 
+        # ── شريط الأوامر ──────────────────────────────────────────────
+        cmdf = ttk.LabelFrame(self, text=" شريط الأوامر — اكتب أمرًا واضغط Enter ", padding=6)
+        crow = ttk.Frame(cmdf)
+        crow.pack(fill="x")
+        ttk.Button(crow, text="▶ تنفيذ", command=self.run_command).pack(side="right", padx=2)
+        self.cmd_var = tk.StringVar()
+        self.cmd_entry = ttk.Entry(crow, textvariable=self.cmd_var, font=("Consolas", 10))
+        self.cmd_entry.pack(side="right", fill="x", expand=True, padx=(4, 2))
+        self.cmd_entry.bind("<Return>", lambda e: self.run_command())
+        ttk.Label(cmdf, style="Muted.TLabel", font=("Segoe UI", 8),
+                  text="أمثلة: install tiktok lite | open chrome https://... | !adb shell ... | help"
+                  ).pack(fill="x", pady=(3, 0))
+
         # تغيير من الخارج
         chg = ttk.LabelFrame(self, text=" تغيير من الخارج ", padding=8)
         chg.pack(fill="x", padx=12, pady=4)
@@ -913,10 +926,11 @@ class App(tk.Tk):
         self.logbox.configure(state="disabled")
 
         # ترتيب الحزم من الأسفل للأعلى حتى لا يُقص السجل في النوافذ الصغيرة
-        for w in (logf, chg, act, mid):
+        for w in (logf, chg, cmdf, act, mid):
             w.pack_forget()
         logf.pack(side="bottom", fill="x", padx=12, pady=(2, 8))
         chg.pack(side="bottom", fill="x", padx=12, pady=4)
+        cmdf.pack(side="bottom", fill="x", padx=12, pady=(2, 2))
         act.pack(side="bottom", fill="x", padx=12, pady=(8, 2))
         mid.pack(fill="both", expand=True, pady=(0, 2))
 
@@ -944,6 +958,36 @@ class App(tk.Tk):
             messagebox.showinfo("تنبيه", "اختر سيرفرًا من الجدول أولًا")
             return False
         return True
+
+    def run_command(self):
+        """ينفّذ سطر الأوامر على السيرفر المحدد عبر مُنسّق cmd.py."""
+        if not self.require_sel():
+            return
+        line = self.cmd_var.get().strip()
+        if not line:
+            return
+        # «هذا / this» → استبدلها بالرابط الموجود في حافظة الحاسوب
+        if any(k in line for k in ("هذا", "this")):
+            try:
+                clip = self.clipboard_get().strip()
+            except Exception:
+                clip = ""
+            if clip.startswith(("http://", "https://")):
+                line = line.replace("هذا", clip).replace("this", clip)
+        self.cmd_var.set("")
+        self.log(f"cmd → {line}")
+        self.set_pill("جارٍ تنفيذ الأمر…", ORANGE)
+
+        def work():
+            out = self._ssh(f"python3 ~/bin/cmd.py {shlex.quote(line)}", timeout=180)
+            out = (out or "").strip()
+            if out.startswith("__ERR__"):
+                self.after(0, lambda: self.log(f"cmd: {out[:500]}"))
+                self.after(0, lambda: self.set_pill("فشل الأمر", RED))
+            else:
+                self.after(0, lambda: self.log("cmd: " + out[:600]))
+                self.after(0, lambda: self.set_pill("تم", GREEN))
+        self._bg(work)
 
     def password_of(self, row):
         if not row:
