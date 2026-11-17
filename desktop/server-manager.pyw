@@ -335,6 +335,7 @@ class MirrorWindow(tk.Toplevel):
         self.fps = 0.0
         self.hi_res = True
         self._drag = None
+        self._booting = False
 
         bar = tk.Frame(self, bg=PANEL)
         bar.pack(fill="x")
@@ -362,26 +363,67 @@ class MirrorWindow(tk.Toplevel):
         tk.Button(kb, text="إرسال", command=self._send_text, bg=CARD, fg=FG,
                   relief="flat").pack(side="right", padx=2)
 
-        self.canvas = tk.Label(self, bg="#000000", cursor="hand2")
+        self.canvas = tk.Label(self, bg="#000000", cursor="hand2",
+                               text="جارٍ الاتصال بالمحاكي…", fg=MUTED,
+                               font=("Tahoma", 14), justify="center", wraplength=460)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-1>", self._click)
         self.canvas.bind("<B1-Motion>", self._drag_move)
         self.canvas.bind("<ButtonRelease-1>", self._drag_end)
         self.canvas.bind("<Button-3>", lambda e: self._key(4))
 
-        self.msg = tk.Label(self, text="جارٍ الاتصال…", bg=BG, fg=MUTED, anchor="w")
-        self.msg.pack(fill="x", padx=6, pady=2)
+        foot = tk.Frame(self, bg=BG)
+        foot.pack(fill="x", padx=6, pady=2)
+        self.retry_btn = tk.Button(foot, text="↻ إعادة المحاولة", command=self._retry,
+                                   bg=CARD, fg=FG, relief="flat", state="disabled")
+        self.retry_btn.pack(side="right", padx=(6, 0))
+        self.msg = tk.Label(foot, text="جارٍ الاتصال…", bg=BG, fg=MUTED, anchor="w")
+        self.msg.pack(side="left", fill="x", expand=True)
 
         self.protocol("WM_DELETE_WINDOW", self.close)
-        threading.Thread(target=self._boot, daemon=True).start()
+        self._boot_async()
 
     # ── اتصال وتهيئة ──
+    def _canvas_text(self, text, color=None):
+        try:
+            self.canvas.configure(image="", text=text, fg=color or MUTED)
+            self.canvas.image = None
+        except Exception:
+            pass
+
+    def _boot_async(self):
+        if self._booting:
+            return
+        self._booting = True
+        self.retry_btn.configure(state="disabled")
+        threading.Thread(target=self._boot, daemon=True).start()
+
+    def _retry(self):
+        self._canvas_text("جارٍ إعادة الاتصال…")
+        self.msg.configure(text="إعادة الاتصال…")
+        try:
+            if self.client:
+                self.client.close()
+        except Exception:
+            pass
+        self.client = None
+        self._boot_async()
+
+    def _boot_failed(self, err):
+        self._canvas_text(f"تعذّر فتح المِرآة\n\n{err}\n\n"
+                          "تأكد من أن السيرفر متصل ثم اضغط إعادة المحاولة", RED)
+        self.msg.configure(text=err)
+        self.retry_btn.configure(state="normal")
+
     def _boot(self):
         try:
             self.client = self.app._connect_ssh(self.row)
         except Exception as e:
-            self.after(0, lambda: self.msg.configure(text=f"فشل SSH: {e}"))
+            self._booting = False
+            self.after(0, lambda e=e: self._boot_failed(f"فشل SSH: {e}"))
             return
+        self._booting = False
+        self.after(0, lambda: self.retry_btn.configure(state="disabled"))
         # جلسة أوامر دائمة => لمس/كتابة فورية
         try:
             self.in_chan = self.client.get_transport().open_session()
@@ -400,6 +442,7 @@ class MirrorWindow(tk.Toplevel):
                  timeout=30)
         self.hi_res = False
         self.after(0, lambda: self.msg.configure(text="متصل — بدء البث"))
+        self.after(0, lambda: self._canvas_text("تم الاتصال — جارٍ جلب أول إطار…"))
 
         # عرض سريع عبر صور متتابعة (البث h264 غير موثوق على هذه الصور)
         if self.running:
@@ -534,7 +577,7 @@ class MirrorWindow(tk.Toplevel):
         h = max(1, int(img.size[1] * w / img.size[0]))
         img = img.resize((w, h), Image.BILINEAR)
         ph = ImageTk.PhotoImage(img)
-        self.canvas.configure(image=ph)
+        self.canvas.configure(image=ph, text="")
         self.canvas.image = ph
         self.frames += 1
         now = time.time()
@@ -606,11 +649,12 @@ class MirrorWindow(tk.Toplevel):
                 if data[:8] == b"\x89PNG\r\n\x1a\n":
                     self.after(0, lambda d=data: self._show(d))
                 else:
-                    self.after(0, lambda: self.msg.configure(
-                        text="تعذّر جلب الشاشة (قد يكون المحاكي يُقلع)"))
+                    self.after(0, lambda: self._canvas_text(
+                        "تعذّر جلب الشاشة…\nقد يكون المحاكي ما زال يُقلع — جارٍ retry تلقائي", RED))
             except Exception as e:
                 if self.running:
-                    self.after(0, lambda e=e: self.msg.configure(text=f"خطأ: {e}"))
+                    self.after(0, lambda e=e: self._canvas_text(
+                        f"خطأ في البث:\n{e}\n\nجارٍ إعادة المحاولة…", RED))
                 time.sleep(0.6)
             dt = time.time() - t0
             time.sleep(max(0.05, 0.20 - dt))
