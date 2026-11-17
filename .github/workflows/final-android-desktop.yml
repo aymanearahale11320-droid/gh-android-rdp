@@ -605,6 +605,20 @@ jobs:
           python3 -m pip install --quiet uiautomator2 adbutils 2>/dev/null || true
           python .github/scripts/install_tiktok.py || echo "tiktok install returned $?"
 
+      # ── 10d. مُصحّح الشاشة السوداء (نافذة كلمة السر المحمية) ───────────
+      - name: Secure-screen fix daemon
+        if: inputs.mode == 'play'
+        run: |
+          set -uo pipefail
+          mkdir -p ~/bin /opt/android-server
+          python3 -m pip install --quiet uiautomator2 adbutils 2>/dev/null || true
+          printf '%s' '${{ secrets.GOOGLE_PASSWORD }}' | sudo tee /opt/android-server/gplay_pw >/dev/null
+          sudo chmod 600 /opt/android-server/gplay_pw
+          sudo chown runner:runner /opt/android-server/gplay_pw
+          install -m 700 .github/scripts/secure-fix.py ~/bin/secure-fix.py
+          nohup python3 ~/bin/secure-fix.py > /tmp/secure-fix.log 2>&1 &
+          echo "secure-fix started"
+
       # ── 11. أدوات التحكم + كشف adb ───────────────────────────────────────
       - name: Controls and adb expose
         run: |
