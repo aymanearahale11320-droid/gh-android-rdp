@@ -107,6 +107,7 @@ jobs:
             echo "HOST_NAME=gh-android-${GITHUB_RUN_ID}"
           } >> "$GITHUB_ENV"
 
+          export STATUS_FILE="status-${{ inputs.slot }}.txt"
           source .github/scripts/publish.sh
           publish_set STATE=starting SLOT=${{ inputs.slot }} RUN=${GITHUB_RUN_ID} \
             START="$START" INSTANCES="$N" MODE="$MODE" ROOT="$ROOT" \
