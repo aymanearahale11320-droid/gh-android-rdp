@@ -345,6 +345,7 @@ class MirrorWindow(tk.Toplevel):
                          ("⏻", lambda: self._key(26)),
                          ("⚡", self._boost_perf),
                          ("📋", self._smart_paste),
+                         ("🔐", self._play_setup),
                          ("🔍", self._toggle_res)):
             tk.Button(bar, text=txt, command=cmd, bg=CARD, fg=FG, relief="flat",
                       width=3).pack(side="right", padx=1, pady=3)
@@ -499,6 +500,25 @@ class MirrorWindow(tk.Toplevel):
                             self.after(0, lambda: self.msg.configure(text="وضع الأداء الأقصى ✓"))),
             daemon=True).start()
 
+    def _play_setup(self):
+        """أكمل شاشات إعداد Play المحprotected (Use password) من جهة السيرفر.
+
+        نافذة إدخال كلمة سر Google محمية من screencap، فتبدو المِرآة سوداء.
+        المساعد على السيرفر يقرأ كلمة السر من ملف سري ويضبطها عبر uiautomator.
+        """
+        def work():
+            try:
+                out = self.app._ssh("python3 ~/bin/play-setup.py",
+                                    row=self.row, timeout=90)
+                out = (out or "").strip()
+                self.after(0, lambda: self.msg.configure(text=out[:220] or "تم"))
+                self.after(0, lambda: self._canvas_text(
+                    "تم إكمال إعداد Play — جارٍ جلب الشاشة…"))
+            except Exception as e:
+                self.after(0, lambda e=e: self.msg.configure(
+                    text=f"فشل إعداد Play: {e}"))
+        threading.Thread(target=work, daemon=True).start()
+
     def _toggle_res(self):
         self.hi_res = not self.hi_res
         if self.hi_res:
@@ -650,7 +670,9 @@ class MirrorWindow(tk.Toplevel):
                     self.after(0, lambda d=data: self._show(d))
                 else:
                     self.after(0, lambda: self._canvas_text(
-                        "تعذّر جلب الشاشة…\nقد يكون المحاكي ما زال يُقلع — جارٍ retry تلقائي", RED))
+                        "لا تظهر صورة حاليًا\n"
+                        "إما أن المحاكي يُقلع، أو نافذة كلمة سر Google محمية\n"
+                        "اضغط 🔐 لإكمال إعداد Play — ثم ↻ إعادة المحاولة", RED))
             except Exception as e:
                 if self.running:
                     self.after(0, lambda e=e: self._canvas_text(
