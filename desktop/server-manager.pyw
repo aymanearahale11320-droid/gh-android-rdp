@@ -469,8 +469,14 @@ class MirrorWindow(tk.Toplevel):
         self.after(0, lambda: self.msg.configure(text="متصل — بدء البث"))
         self.after(0, lambda: self._canvas_text("تم الاتصال — جارٍ جلب أول إطار…"))
 
-        # عرض سريع عبر صور متتابعة (البث h264 غير موثوق على هذه الصور)
+        # تأكد من وجود ffmpeg على السيرفر (يُستخدم لفك ترميز البث)
+        self._sh("IDX=0 ~/bin/ctl.sh ensure-ffmpeg", timeout=120)
+        # جرّب البث المباشر MJPEG أولًا (أسرع بكثير)، ثم ارجع للصور إن فشل
+        stream_ok = False
         if self.running:
+            stream_ok = self._stream_loop()
+        if self.running and not stream_ok:
+            self.msg.configure(text="وضع الصور (احتياطي)")
             self._snapshot_loop()
 
     def _sh(self, cmd, timeout=20):
@@ -681,7 +687,8 @@ class MirrorWindow(tk.Toplevel):
             self.info.configure(text=f"{self.fps:.1f} fps · إدخال {chan}")
 
     def _stream_loop(self):
-        """يقرأ تدفّق MJPEG من المضيف ويعرض الإطارات فور وصولها."""
+        """يقرأ تدفّق MJPEG من المضيف ويعرض الإطارات فور وصولها.
+        يعيد True إن نجح البث (ويعيد الاتصال تلقائيًا عند انقطاعه)."""
         buf = bytearray()
         got_any = False
         t_start = time.time()
@@ -689,7 +696,7 @@ class MirrorWindow(tk.Toplevel):
             try:
                 chan = self.client.get_transport().open_session()
                 chan.exec_command("IDX=0 ~/bin/ctl.sh stream")
-                self.after(0, lambda: self.msg.configure(text="بث مباشر (MJPEG)"))
+                self.after(0, lambda: self.msg.configure(text="بث مباشر (MJPEG) — 10 fps"))
                 while self.running:
                     data = chan.recv(65536)
                     if not data:
@@ -715,11 +722,13 @@ class MirrorWindow(tk.Toplevel):
                 except Exception:
                     pass
             except Exception:
-                time.sleep(0.5)
-            if not got_any and (time.time() - t_start) > 8:
-                return  # البث لا يعمل ⇒ الوضع البديل
+                pass
+            if not got_any and (time.time() - t_start) > 10:
+                return False  # البث لم يبدأ ⇒ الوضع البديل (الصور)
+            # انقطع البث بعد أن كان يعمل ⇒ أعد المحاولة بصبر
             if self.running:
-                time.sleep(0.1)
+                time.sleep(1)
+        return got_any
 
     def _snapshot_loop(self):
         while self.running:
