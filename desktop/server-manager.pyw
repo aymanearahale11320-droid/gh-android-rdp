@@ -593,6 +593,13 @@ class MirrorWindow(tk.Toplevel):
                 n = int(args[1])
                 if n:
                     self._swipe_scroll(n > 0)
+            elif args and args[0] == "moveto":
+                frac = float(args[1])
+                prev = getattr(self, "_last_scroll_frac", 0.5)
+                diff = frac - prev
+                self._last_scroll_frac = frac
+                if abs(diff) > 0.01:
+                    self._swipe_scroll(diff > 0)
             self.emu_scroll.set(0.4, 0.6)
         except Exception:
             pass
