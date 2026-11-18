@@ -770,7 +770,24 @@ class App(tk.Tk):
 
     # ── بناء الواجهة ──
     def _build(self):
-        top = ttk.Frame(self, padding=(12, 10, 12, 4))
+        # حاوية قابلة للتمرير + شريط رأسي على الجانب
+        wrap = ttk.Frame(self)
+        wrap.pack(fill="both", expand=True)
+        self._main_canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
+        self._vscroll = ttk.Scrollbar(wrap, orient="vertical",
+                                      command=self._main_canvas.yview)
+        self._main_canvas.configure(yscrollcommand=self._vscroll.set)
+        self._vscroll.pack(side="right", fill="y")
+        self._main_canvas.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(self._main_canvas)
+        self._inner_win = self._main_canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", self._on_inner_configure)
+        self._main_canvas.bind("<Configure>", self._on_canvas_configure)
+        self._main_canvas.bind("<MouseWheel>", self._on_wheel)
+        inner.bind("<MouseWheel>", self._on_wheel)
+        self.after(300, self._on_inner_configure)
+
+        top = ttk.Frame(inner, padding=(12, 10, 12, 4))
         top.pack(fill="x")
 
         ttk.Button(top, text="+ سيرفر جديد", style="Accent.TButton",
@@ -785,7 +802,7 @@ class App(tk.Tk):
         self.pill.pack(side="left")
 
         # شريط التحقق (يظهر فقط عند طلب Google رقمًا على الهاتف)
-        self.vb = tk.Frame(self, bg="#8a4b00", padx=14, pady=8)
+        self.vb = tk.Frame(inner, bg="#8a4b00", padx=14, pady=8)
         self.vb_code = tk.Label(self.vb, text="", bg="#8a4b00", fg="#ffffff",
                                 font=("Consolas", 44, "bold"))
         self.vb_code.pack(side="left", padx=(6, 18))
@@ -802,7 +819,7 @@ class App(tk.Tk):
 
 
         # جدول السيرفرات
-        mid = ttk.Frame(self, padding=(12, 4))
+        mid = ttk.Frame(inner, padding=(12, 4))
         mid.pack(fill="both", expand=True)
         self.mid = mid
 
@@ -821,7 +838,7 @@ class App(tk.Tk):
         self.tree.tag_configure("pending", foreground=ORANGE)
 
         # أزرار التحكم
-        act = ttk.LabelFrame(self, text=" تحكم بالسيرفر المحدد ", padding=8)
+        act = ttk.LabelFrame(inner, text=" تحكم بالسيرفر المحدد ", padding=8)
         act.pack(fill="x", padx=12, pady=(8, 2))
         r1 = ttk.Frame(act)
         r1.pack(fill="x", pady=2)
@@ -861,7 +878,7 @@ class App(tk.Tk):
         self.sel_lbl.pack(side="left", padx=6)
 
         # ── شريط الأوامر ──────────────────────────────────────────────
-        cmdf = ttk.LabelFrame(self, text=" شريط الأوامر — اكتب أمرًا واضغط Enter ", padding=6)
+        cmdf = ttk.LabelFrame(inner, text=" شريط الأوامر — اكتب أمرًا واضغط Enter ", padding=6)
         crow = ttk.Frame(cmdf)
         crow.pack(fill="x")
         ttk.Button(crow, text="▶ تنفيذ", command=self.run_command).pack(side="right", padx=2)
@@ -874,7 +891,7 @@ class App(tk.Tk):
                   ).pack(fill="x", pady=(3, 0))
 
         # تغيير من الخارج
-        chg = ttk.LabelFrame(self, text=" تغيير من الخارج ", padding=8)
+        chg = ttk.LabelFrame(inner, text=" تغيير من الخارج ", padding=8)
         chg.pack(fill="x", padx=12, pady=4)
 
         g = ttk.Frame(chg)
@@ -930,7 +947,7 @@ class App(tk.Tk):
         self.btn["proxy_off"].pack(side="right", padx=2)
 
         # السجل
-        logf = ttk.LabelFrame(self, text=" السجل ", padding=(6, 2, 6, 4))
+        logf = ttk.LabelFrame(inner, text=" السجل ", padding=(6, 2, 6, 4))
         logf.pack(side="bottom", fill="x", padx=12, pady=(2, 8))
         self.logbox = tk.Text(logf, height=5, bg="#0e0f14", fg="#8fe6a8", relief="flat",
                               insertbackground="#8fe6a8", font=("Consolas", 9), wrap="word")
@@ -948,6 +965,27 @@ class App(tk.Tk):
 
         self.bind("<F5>", lambda e: self.refresh())
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    # ── تمرير النافذة ──
+    def _on_inner_configure(self, _e=None):
+        try:
+            self._main_canvas.configure(scrollregion=self._main_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _on_canvas_configure(self, e=None):
+        try:
+            w = e.width if e else self._main_canvas.winfo_width()
+            if w > 1:
+                self._main_canvas.itemconfig(self._inner_win, width=w)
+        except Exception:
+            pass
+
+    def _on_wheel(self, e):
+        try:
+            self._main_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        except Exception:
+            pass
 
     # ── سجل ومساعدة ──
     def log(self, msg):
