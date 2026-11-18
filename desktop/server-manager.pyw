@@ -365,14 +365,22 @@ class MirrorWindow(tk.Toplevel):
         tk.Button(kb, text="إرسال", command=self._send_text, bg=CARD, fg=FG,
                   relief="flat").pack(side="right", padx=2)
 
+        # شريط تمرير داخل المِرآة لتمرير محتوى الأندرويد صعودًا/نزولًا
+        self.emu_scroll = ttk.Scrollbar(self, orient="vertical",
+                                        command=self._emu_scroll, cursor="hand2")
+        self.emu_scroll.pack(side="right", fill="y")
+        self.emu_scroll.set(0.4, 0.6)
+        self._last_scroll = 0.0
+
         self.canvas = tk.Label(self, bg="#000000", cursor="hand2",
                                text="جارٍ الاتصال بالمحاكي…", fg=MUTED,
                                font=("Tahoma", 14), justify="center", wraplength=460)
-        self.canvas.pack(fill="both", expand=True)
+        self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Button-1>", self._click)
         self.canvas.bind("<B1-Motion>", self._drag_move)
         self.canvas.bind("<ButtonRelease-1>", self._drag_end)
         self.canvas.bind("<Button-3>", lambda e: self._key(4))
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
 
         foot = tk.Frame(self, bg=BG)
         foot.pack(fill="x", padx=6, pady=2)
@@ -558,6 +566,36 @@ class MirrorWindow(tk.Toplevel):
     def _toggle_pause(self):
         self.paused = not self.paused
         self.pause_btn.configure(text="▶" if self.paused else "⏸")
+
+    # ── تمرير داخل المحاكي ──
+    def _swipe_scroll(self, down=True):
+        if not self.dev_w:
+            return
+        now = time.time()
+        if now - self._last_scroll < 0.12:
+            return
+        self._last_scroll = now
+        cx = self.dev_w // 2
+        y1 = int(self.dev_h * 0.75)
+        y2 = int(self.dev_h * 0.25)
+        if not down:
+            y1, y2 = y2, y1
+        self._send(f"input swipe {cx} {y1} {cx} {y2} 220")
+
+    def _on_mouse_wheel(self, e):
+        # عجلة الفأرة: للأعلى = تمرير المحتوى للأعلى، للأسفل = للأسفل
+        self._swipe_scroll(e.delta < 0)
+        return "break"
+
+    def _emu_scroll(self, *args):
+        try:
+            if args and args[0] == "scroll":
+                n = int(args[1])
+                if n:
+                    self._swipe_scroll(n > 0)
+            self.emu_scroll.set(0.4, 0.6)
+        except Exception:
+            pass
 
     # ── لمس (إحداثيات دقيقة + إجراء واحد فقط لكل ضغطة) ──
     def _dev_xy(self, x, y):
