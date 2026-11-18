@@ -767,6 +767,9 @@ class App(tk.Tk):
         s.map("Danger.TButton", background=[("active", "#a03040")])
         s.configure("TLabelframe", background=BG, foreground=MUTED, bordercolor="#2f3242")
         s.configure("TLabelframe.Label", background=BG, foreground=MUTED)
+        s.configure("Vertical.TScrollbar", background="#4b5166", troughcolor="#0e0f14",
+                    arrowcolor=FG, bordercolor="#0e0f14", relief="flat")
+        s.map("Vertical.TScrollbar", background=[("active", "#5d6580")])
 
     # ── بناء الواجهة ──
     def _build(self):
@@ -786,6 +789,7 @@ class App(tk.Tk):
         self._main_canvas.bind("<MouseWheel>", self._on_wheel)
         inner.bind("<MouseWheel>", self._on_wheel)
         self.after(300, self._on_inner_configure)
+        self.after(800, self._force_scroll)
 
         top = ttk.Frame(inner, padding=(12, 10, 12, 4))
         top.pack(fill="x")
@@ -970,6 +974,16 @@ class App(tk.Tk):
     def _on_inner_configure(self, _e=None):
         try:
             self._main_canvas.configure(scrollregion=self._main_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _force_scroll(self):
+        try:
+            inner = self._main_canvas.nametowidget(self._inner_win)
+            w = self._main_canvas.winfo_width()
+            h = max(inner.winfo_reqheight(), self._main_canvas.winfo_height())
+            self._main_canvas.configure(scrollregion=(0, 0, w, h))
+            self._vscroll.configure(cursor="hand2")
         except Exception:
             pass
 
