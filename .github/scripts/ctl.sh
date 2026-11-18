@@ -191,6 +191,23 @@ case "${1:-help}" in
     rm -f /tmp/sm_paste.txt
     echo "typed (${#TXT} chars)"
     ;;
+  ensure-ffmpeg)
+    if command -v ffmpeg >/dev/null 2>&1; then echo FFMPEG_OK; exit 0; fi
+    sudo -n apt-get update -qq >/dev/null 2>&1 || true
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg >/dev/null 2>&1 || true
+    if command -v ffmpeg >/dev/null 2>&1; then echo FFMPEG_OK; else echo FFMPEG_MISSING; fi
+    ;;
+  stream)
+    # بث MJPEG مباشر: الترميز h264 على الجهاز + فك الترميز على المضيف + نقل JPEG
+    # -r 12 + -q:v 6 => صورة أوضح وأط Cyrل بزمن ترميز أقل (أسرع استجابة)
+    # -probesize/ -analyzeduration صغيرة => بدء أسرع للبث
+    "$ADB" -s "$DEV" exec-out screenrecord --output-format=h264 --time-limit 175 \
+      --bit-rate 8000000 - 2>/dev/null \
+      | ffmpeg -hide_banner -loglevel error -probesize 50000 -analyzeduration 100000 \
+               -f h264 -i pipe:0 -an \
+               -vf scale=480:-2 -r 12 -f image2pipe -vcodec mjpeg -q:v 6 \
+               -flush_packets 1 -threads 2 pipe:1
+    ;;
   pkgs)
     echo "enabled=$("$ADB" -s "$DEV" shell pm list packages -e 2>/dev/null | wc -l) disabled=$("$ADB" -s "$DEV" shell pm list packages -d 2>/dev/null | wc -l)"
     ;;
