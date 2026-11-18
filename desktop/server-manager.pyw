@@ -223,6 +223,8 @@ class CreateDialog(tk.Toplevel):
         self.desk = tk.BooleanVar(value=False)
         self.pw = tk.StringVar(value=gen_password())
         self.imei = tk.StringVar(value=gen_imei())
+        self.gplay = tk.BooleanVar(value=True)   # تسجيل Google التلقائي (الهوية/المعرف)
+        self.matchapps = tk.BooleanVar(value=False)  # مطابقة تطبيقات الهاتف (أبطأ قليلًا)
 
         pad = {"padx": 12, "pady": 6}
         head = tk.Frame(self, bg=BG)
@@ -277,6 +279,17 @@ class CreateDialog(tk.Toplevel):
         ttk.Button(imf, text="⟳", width=3, command=lambda: self.imei.set(gen_imei())).pack(side="right", padx=4)
         tk.Label(grid, text="IMEI", bg=BG, fg=MUTED, width=16, anchor="e").grid(row=5, column=2, sticky="e", pady=5, padx=(0, 8))
 
+        opt = tk.Frame(grid, bg=BG)
+        opt.grid(row=6, column=1, sticky="w", pady=5)
+        tk.Checkbutton(opt, text="تسجيل Google (الهوية/المعرف)", variable=self.gplay,
+                       bg=BG, fg=FG, selectcolor=PANEL, activebackground=BG,
+                       activeforeground=FG, font=("Segoe UI", 9)).pack(side="right", padx=6)
+        tk.Checkbutton(opt, text="تطابق تطبيقات الهاتف", variable=self.matchapps,
+                       bg=BG, fg=FG, selectcolor=PANEL, activebackground=BG,
+                       activeforeground=FG, font=("Segoe UI", 9)).pack(side="right", padx=6)
+        tk.Label(grid, text="خيارات إضافية", bg=BG, fg=MUTED, width=16, anchor="e").grid(
+            row=6, column=2, sticky="e", pady=5, padx=(0, 8))
+
         note = ("✓ الوضع play: Google Play عامل + كروم + الإعدادات فقط، أقصى سرعة\n"
                 "✓ الوضع root: صلاحيات كاملة (تغيير MAC/Android ID)، بلا متجر\n"
                 "✓ سطح المكتب معطّل = كل موارد السيرفر للمحاكي (الأسرع)")
@@ -305,6 +318,8 @@ class CreateDialog(tk.Toplevel):
             "slot": self.slot.get(), "instances": self.inst.get(),
             "mode": self.mode.get(), "desktop": "true" if self.desk.get() else "false",
             "password": self.pw.get().strip(), "imei": self.imei.get().strip(),
+            "gplay": "true" if self.gplay.get() else "false",
+            "matchapps": "true" if self.matchapps.get() else "false",
         }
         self.destroy()
 
@@ -1526,7 +1541,9 @@ class App(tk.Tk):
             cmd = [GH, "workflow", "run", WORKFLOW, "--repo", REPO,
                    "-f", f"slot={data['slot']}", "-f", f"instances={data['instances']}",
                    "-f", f"mode={data['mode']}", "-f", f"desktop={data['desktop']}",
-                   "-f", f"password={data['password']}", "-f", f"imei={data['imei']}"]
+                   "-f", f"password={data['password']}", "-f", f"imei={data['imei']}",
+                    "-f", f"gplay_signin={data.get('gplay', 'true')}",
+                    "-f", f"match_apps={data.get('matchapps', 'false')}"]
             if pub:
                 cmd += ["-f", f"ssh_pubkey={pub}"]
             out = sh(cmd, timeout=90)
