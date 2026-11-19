@@ -224,7 +224,8 @@ class CreateDialog(tk.Toplevel):
         self.pw = tk.StringVar(value=gen_password())
         self.imei = tk.StringVar(value=gen_imei())
         self.gplay = tk.BooleanVar(value=True)   # تسجيل Google التلقائي (الهوية/المعرف)
-        self.matchapps = tk.BooleanVar(value=False)  # مطابقة تطبيقات الهاتف (أبطأ قليلًا)
+        self.matchapps = tk.BooleanVar(value=True)  # مطابقة تطبيقات الهاتف (افتراضي — نفس تطبيقات الهاتف العادي)
+        self.proxy = tk.StringVar(value="")      # بروكسي سكني/موبايل اختياري (IP مختلف لكل نسخة)
 
         pad = {"padx": 12, "pady": 6}
         head = tk.Frame(self, bg=BG)
@@ -290,6 +291,13 @@ class CreateDialog(tk.Toplevel):
         tk.Label(grid, text="خيارات إضافية", bg=BG, fg=MUTED, width=16, anchor="e").grid(
             row=6, column=2, sticky="e", pady=5, padx=(0, 8))
 
+        ttk.Entry(grid, textvariable=self.proxy, width=30).grid(row=7, column=1, sticky="ew", pady=5)
+        tk.Label(grid, text="Proxy (IP مختلف)", bg=BG, fg=MUTED, width=16, anchor="e").grid(
+            row=7, column=2, sticky="e", pady=5, padx=(0, 8))
+        tk.Label(grid, text="http://user:pass@host:port — اتركه فارغًا لـ IP GitHub",
+                 bg=BG, fg="#6f7789", anchor="w", font=("Segoe UI", 8)).grid(
+            row=7, column=0, sticky="w", padx=(8, 0))
+
         note = ("✓ الوضع play: Google Play عامل + كروم + الإعدادات فقط، أقصى سرعة\n"
                 "✓ الوضع root: صلاحيات كاملة (تغيير MAC/Android ID)، بلا متجر\n"
                 "✓ سطح المكتب معطّل = كل موارد السيرفر للمحاكي (الأسرع)")
@@ -320,6 +328,7 @@ class CreateDialog(tk.Toplevel):
             "password": self.pw.get().strip(), "imei": self.imei.get().strip(),
             "gplay": "true" if self.gplay.get() else "false",
             "matchapps": "true" if self.matchapps.get() else "false",
+            "proxy": self.proxy.get().strip(),
         }
         self.destroy()
 
@@ -1235,6 +1244,7 @@ class App(tk.Tk):
                     "aid": info.get("AID", ""), "apps": info.get("APPS", ""),
                     "cores": info.get("CORES", ""), "mem": info.get("MEM", ""),
                     "ports": info.get("PORTS", ""),
+                    "public_ip": info.get("PUBLIC_IP", ""),
                     "adb_server": info.get("ADB_SERVER", "15037"),
                     "sshkey": info.get("SSH_KEY", "0"),
                     "verify": info.get("VERIFY", ""),
@@ -1553,6 +1563,8 @@ class App(tk.Tk):
                    "-f", f"password={data['password']}", "-f", f"imei={data['imei']}",
                     "-f", f"gplay_signin={data.get('gplay', 'true')}",
                     "-f", f"match_apps={data.get('matchapps', 'false')}"]
+            if data.get("proxy"):
+                cmd += ["-f", f"proxy_url={data['proxy']}"]
             if pub:
                 cmd += ["-f", f"ssh_pubkey={pub}"]
             out = sh(cmd, timeout=90)
@@ -2150,6 +2162,7 @@ class App(tk.Tk):
                f"CPU: {r['cores'] or '—'} · RAM: {r['mem'] or '—'}MB\n"
                f"MAC: {r['mac'] or '—'}\nIMEI: {r['imei'] or '—'}\n"
                f"Android ID: {r['aid'] or '—'}\nPorts: {r['ports'] or '—'}\n"
+               f"IP العام: {r.get('public_ip') or '—'}\n"
                f"المتبقي: {(fmt_remaining(r['start']) or '—') if r['online'] else '—'}")
         messagebox.showinfo("بيانات السيرفر", txt)
 
