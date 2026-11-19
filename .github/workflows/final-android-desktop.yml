@@ -52,6 +52,10 @@ on:
         description: "إبقاء تطبيقات متجر Play فقط (مطابقة هاتف نظيف) — false = الاحتفاظ بكل التطبيقات المثبّتة"
         default: "false"
         required: false
+      proxy_url:
+        description: "اختياري: بروكسي سكني/موبايل بصيغة http://user:pass@host:port — يُعطي كل نسخة IP خاص بها (يُخزّن كـ Secret). اتركه فارغًا لاستخدام IPGitHub المجاني"
+        default: ""
+        required: false
 
 concurrency:
   group: android-session-${{ inputs.slot }}
@@ -126,6 +130,31 @@ jobs:
             DESKTOP="$DESK" ANDROID="$API" IMAGE="$IMG_TAG" CORES="$CORES" \
             MEM="$MEM" IMEI="$IMEI_VAL" HOST="gh-android-${GITHUB_RUN_ID}" UPDATED="$START"
           echo "build: $MODE/api$API · ${N}x(${CORES}c/${MEM}MB) · imei=$IMEI_VAL"
+
+      # ── 0b. IP العام + بروكسي اختياري (لكل نسخة IP مختلف) ───────────────
+      - name: Public IP & optional proxy
+        env:
+          PROXY_URL: ${{ inputs.proxy_url }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          # اضبط متغيرات البروكسي للخطوات/QEMU إن تُرك مدخل البروكسي
+          if [ -n "${PROXY_URL:-}" ]; then
+            echo "HTTP_PROXY=$PROXY_URL" >> "$GITHUB_ENV"
+            echo "HTTPS_PROXY=$PROXY_URL" >> "$GITHUB_ENV"
+            echo "NO_PROXY=localhost,127.0.0.1,github.com,api.github.com" >> "$GITHUB_ENV"
+            echo "proxy enabled for this run"
+          fi
+          # IP العام الخارجي كما يراه الإنترنت (داخل البروكسي إن وُجد)
+          PUB=""
+          for u in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
+            PUB=$(curl -s --max-time 10 "$u" 2>/dev/null | tr -d '\r\n' || true)
+            [ -n "$PUB" ] && break
+          done
+          echo "PUBLIC_IP=${PUB:-unknown}" >> "$GITHUB_ENV"
+          echo "public egress IP: ${PUB:-unknown}"
+          source .github/scripts/publish.sh
+          publish_set PUBLIC_IP="${PUB:-unknown}" UPDATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
       # ── 1. KVM ───────────────────────────────────────────────────────────
       - name: Enable KVM
@@ -513,36 +542,42 @@ jobs:
           set -uo pipefail
           SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
           ADB="$SDK/platform-tools/adb"
-          PKGS="com.google.android.youtube
-          com.google.android.apps.youtube.music
-          com.google.android.apps.maps
-          com.google.android.gm
-          com.google.android.apps.photos
-          com.google.android.apps.docs
-          com.google.android.videos
-          com.google.android.music
-          com.google.android.googlequicksearchbox
-          com.google.android.apps.messaging
-          com.google.android.calendar
-          com.google.android.contacts
-          com.google.android.dialer
-          com.google.android.apps.wellbeing
-          com.google.android.apps.turbo
-          com.google.android.partnersetup
-          com.google.android.apps.restore
-          com.google.android.feedback
-          com.google.android.printservice.recommendation
-          com.google.android.apps.safetyhub
-          com.google.android.apps.subscriptions.red
-          com.google.android.play.games
-          com.google.android.apps.drive
-          com.google.android.apps.wallpaper
-          com.google.android.apps.tachyon
-          com.google.android.markup
-          com.google.android.apps.nbu.files
-          com.google.android.apps.healthdata
-          com.google.android.apps.nexuslauncher.overlay
-          com.android.chrome.beta"
+          # إن طُلبت مطابقة تطبيقات الهاتف: لا نُعطّل أي تطبيق (نحتفظ بكل تطبيقات Google)
+          if [ "${{ inputs.match_apps }}" = "true" ]; then
+            PKGS=""
+            echo "match_apps=true — الحفاظ على جميع تطبيقات الهاتف (لا debloat)"
+          else
+            PKGS="com.google.android.youtube
+            com.google.android.apps.youtube.music
+            com.google.android.apps.maps
+            com.google.android.gm
+            com.google.android.apps.photos
+            com.google.android.apps.docs
+            com.google.android.videos
+            com.google.android.music
+            com.google.android.googlequicksearchbox
+            com.google.android.apps.messaging
+            com.google.android.calendar
+            com.google.android.contacts
+            com.google.android.dialer
+            com.google.android.apps.wellbeing
+            com.google.android.apps.turbo
+            com.google.android.partnersetup
+            com.google.android.apps.restore
+            com.google.android.feedback
+            com.google.android.printservice.recommendation
+            com.google.android.apps.safetyhub
+            com.google.android.apps.subscriptions.red
+            com.google.android.play.games
+            com.google.android.apps.drive
+            com.google.android.apps.wallpaper
+            com.google.android.apps.tachyon
+            com.google.android.markup
+            com.google.android.apps.nbu.files
+            com.google.android.apps.healthdata
+            com.google.android.apps.nexuslauncher.overlay
+            com.android.chrome.beta"
+          fi
           ENABLED=0
           for i in $(seq 0 $((N-1))); do
             DEV="emulator-$(( 5554 + i * 2 ))"
